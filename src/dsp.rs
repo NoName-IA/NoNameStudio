@@ -140,6 +140,20 @@ impl Biquad {
 fn exp_dec(t: f32, dec: f32) -> f32 {
     (-9.21 * t / dec.max(1e-4)).exp()
 }
+/// Seno rápido de una fase en vueltas (1.0 = una vuelta). Error < 0,000004 (inaudible),
+/// unas 3 veces más rápido que `sin()`.
+#[inline]
+pub fn sin_v(p: f32) -> f32 {
+    let mut x = p - p.round(); // -0,5…0,5
+    if x > 0.25 {
+        x = 0.5 - x;
+    } else if x < -0.25 {
+        x = -0.5 - x;
+    }
+    let z = x * TAU; // -π/2…π/2
+    let z2 = z * z;
+    z * (1.0 + z2 * (-1.0 / 6.0 + z2 * (1.0 / 120.0 + z2 * (-1.0 / 5040.0 + z2 * (1.0 / 362_880.0)))))
+}
 #[inline]
 fn tri(ph: f32) -> f32 {
     let p = ph.fract();
@@ -175,6 +189,9 @@ pub struct Voice {
     smp: Option<Box<SmpState>>,
     /// paneo propio de la voz (-1…1; lo usa el paneo de la pista de la playlist)
     pub pan: f32,
+    /// caídas exponenciales que se actualizan multiplicando (valor y factor por muestra)
+    ex: [f32; 2],
+    exf: [f32; 2],
 }
 
 /// Reproducción de un archivo (NN Sampler y clips de audio).
@@ -196,6 +213,16 @@ pub struct SmpState {
 }
 
 impl Voice {
+    /// Caída exponencial `i` (igual a `exp_dec(t, dec)`), avanzada una muestra multiplicando.
+    #[inline]
+    fn caida(&mut self, i: usize, dec: f32, dt: f32) -> f32 {
+        if self.exf[i] == 0.0 {
+            self.exf[i] = (-9.21 * dt / dec.max(1e-4)).exp();
+        }
+        let v = self.ex[i];
+        self.ex[i] *= self.exf[i];
+        v
+    }
     /// `m` es la nota MIDI (ignorada en percusión), `len` la duración de la nota en segundos.
     pub fn new(ch: usize, kind: Inst, delay: u32, vel: f32, m: f32, len: f32, tune: f32, decay: f32, seed: u32, sr: f32) -> Voice {
         let k = 2f32.powf(tune / 12.0);
@@ -215,7 +242,7 @@ impl Voice {
             Inst::Synth | Inst::Vocal | Inst::Sampler | Inst::Audio | Inst::Plugin => (Biquad::default(), Biquad::default(), len.max(0.05)),
         };
         let note = m.round().clamp(0.0, 127.0) as u8;
-        Voice { ch, kind, delay, t: 0.0, end, vel, freq: mtof(m), k, d, len, ph: [0.0; 4], f1, f2, rng, m, wave: None, sample: None, spos: 0.0, srate: 1.0, done: false, note, held: false, smp: None, pan: 0.0 }
+        Voice { ch, kind, delay, t: 0.0, end, vel, freq: mtof(m), k, d, len, ph: [0.0; 4], f1, f2, rng, m, wave: None, sample: None, spos: 0.0, srate: 1.0, done: false, note, held: false, smp: None, pan: 0.0, ex: [1.0; 2], exf: [0.0; 2] }
     }
 
     /// Voz que reproduce un archivo. `len` = duración de la nota (s); `max_t` = tope (s).
@@ -357,18 +384,20 @@ impl Voice {
         let (k, d) = (self.k, self.d);
         match self.kind {
             Inst::Kick => {
-                let f = 48.0 * k + (130.0 - 48.0) * k * (-t / 0.03).exp();
+                let f = 48.0 * k + (130.0 - 48.0) * k * self.caida(0, 0.03 * 9.21, dt);
                 self.ph[0] = (self.ph[0] + f * dt).fract();
-                let env = if t < 0.004 { t / 0.004 } else { exp_dec(t - 0.004, 0.48 * d) };
-                let body = (self.ph[0] * TAU).sin() * env * v;
+                let env = if t < 0.004 { t / 0.004 } else { self.caida(1, 0.48 * d, dt) };
+                let body = sin_v(self.ph[0]) * env * v;
                 let click = if t < 0.016 { self.f1.run(self.rng.next()) * v * 0.35 * exp_dec(t, 0.015) } else { 0.0 };
                 body + click
             }
             Inst::Snare => {
-                let n = self.f2.run(self.f1.run(self.rng.next())) * v * 0.8 * exp_dec(t, 0.22 * d);
+                let e_ruido = self.caida(0, 0.22 * d, dt);
+                let e_tono = self.caida(1, 0.12 * d, dt);
+                let n = self.f2.run(self.f1.run(self.rng.next())) * v * 0.8 * e_ruido;
                 let f = 160.0 * k + 40.0 * k * (-t / 0.04).exp();
                 self.ph[0] = (self.ph[0] + f * dt).fract();
-                n * 1.6 + tri(self.ph[0]) * v * 0.5 * exp_dec(t, 0.12 * d)
+                n * 1.6 + tri(self.ph[0]) * v * 0.5 * e_tono
             }
             Inst::Clap => {
                 let env = if t < 0.033 {
@@ -383,26 +412,38 @@ impl Voice {
                 self.ph[0] = (self.ph[0] + 820.0 * k * dt).fract();
                 tri(self.ph[0]) * v * 0.5 * exp_dec(t, 0.04 * d) + self.f1.run(self.rng.next()) * v * 0.9 * exp_dec(t, 0.03 * d)
             }
-            Inst::Hat => self.f1.run(self.rng.next()) * v * 0.55 * exp_dec(t, 0.045 * d),
-            Inst::OHat => self.f1.run(self.rng.next()) * v * 0.50 * exp_dec(t, 0.3 * d),
+            Inst::Hat => {
+                let e = self.caida(0, 0.045 * d, dt);
+                self.f1.run(self.rng.next()) * v * 0.55 * e
+            }
+            Inst::OHat => {
+                let e = self.caida(0, 0.3 * d, dt);
+                self.f1.run(self.rng.next()) * v * 0.50 * e
+            }
             Inst::Rhodes => {
                 // FM: portadora y moduladora 1:1, índice que cae de 1.6 a 0.15
+                if self.exf[0] == 0.0 {
+                    self.exf = [(-dt / 0.25).exp(), (-dt / 0.35).exp()];
+                }
                 let a = v * 0.16;
-                let idx = 0.15 + 1.45 * (-t / 0.25).exp();
+                let idx = 0.15 + 1.45 * self.ex[0];
+                self.ex[0] *= self.exf[0];
                 self.ph[1] = (self.ph[1] + self.freq * dt).fract();
                 self.ph[0] = (self.ph[0] + self.freq * dt).fract();
-                let s = (self.ph[0] * TAU + idx * (self.ph[1] * TAU).sin()).sin();
+                let s = sin_v(self.ph[0] + idx * sin_v(self.ph[1]) * (1.0 / TAU));
                 let hold_end = (self.len - 0.05).max(0.1);
                 let env = if t < 0.008 {
                     t / 0.008
                 } else if t < hold_end {
-                    0.35 + 0.65 * (-(t - 0.008) / 0.35).exp()
+                    let e = 0.35 + 0.65 * self.ex[1];
+                    self.ex[1] *= self.exf[1];
+                    e
                 } else {
                     let at = 0.35 + 0.65 * (-(hold_end - 0.008) / 0.35).exp();
                     at * exp_dec(t - hold_end, 0.35)
                 };
                 self.ph[2] = (self.ph[2] + 4.2 * dt).fract();
-                let trem = 0.82 + 0.18 * (self.ph[2] * TAU).sin();
+                let trem = 0.82 + 0.18 * sin_v(self.ph[2]);
                 s * env * a * trem
             }
             Inst::Pad => {
@@ -426,7 +467,7 @@ impl Voice {
                 let a = v * 0.40;
                 self.ph[0] = (self.ph[0] + self.freq * dt).fract();
                 self.ph[1] = (self.ph[1] + self.freq * 2.0 * dt).fract();
-                let s = (self.ph[0] * TAU).sin() + tri(self.ph[1]) * 0.12;
+                let s = sin_v(self.ph[0]) + tri(self.ph[1]) * 0.12;
                 let len = self.len.max(0.08);
                 let env = if t < 0.015 { t / 0.015 } else if t < len - 0.06 { 1.0 - 0.2 * ((t - 0.015) / (len - 0.075).max(0.01)) } else { 0.8 * exp_dec(t - (len - 0.06), 0.06) };
                 self.f1.run(s) * env * a
@@ -452,8 +493,8 @@ impl Voice {
             Inst::Bell => {
                 self.ph[0] = (self.ph[0] + self.freq * dt).fract();
                 self.ph[1] = (self.ph[1] + self.freq * 3.01 * dt).fract();
-                let s = (self.ph[0] * TAU).sin() + 0.15 * (self.ph[1] * TAU).sin();
-                let env = if t < 0.005 { t / 0.005 } else { exp_dec(t - 0.005, 1.1) };
+                let s = sin_v(self.ph[0]) + 0.15 * sin_v(self.ph[1]);
+                let env = if t < 0.005 { t / 0.005 } else { self.caida(0, 1.1, dt) };
                 s * env * v * 0.21
             }
         }

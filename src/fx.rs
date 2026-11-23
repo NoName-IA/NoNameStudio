@@ -345,7 +345,11 @@ pub fn tables() -> &'static Vec<Vec<f32>> {
 
 #[inline]
 pub fn wt_sample(pos: f32, ph: f32) -> f32 {
-    let t = tables();
+    wt_sample_t(tables(), pos, ph)
+}
+
+#[inline]
+fn wt_sample_t(t: &[Vec<f32>], pos: f32, ph: f32) -> f32 {
     let pos = pos.clamp(0.0, 4.0);
     let i = (pos.floor() as usize).min(3);
     let fr = pos - i as f32;
@@ -385,6 +389,18 @@ pub struct WaveState {
     ic1: f32,
     ic2: f32,
     lfo: f32,
+    // valores que no cambian durante la nota: se calculan una vez (antes eran 18 potencias por muestra)
+    inc: [f32; 16],
+    nivel: [f32; 16],
+    pos: [f32; 16],
+    activos: usize,
+    m_listo: f32,
+    sr_listo: f32,
+    // coeficientes del filtro: se actualizan cada 16 muestras
+    cuenta: u32,
+    fg: f32,
+    fk: f32,
+    fa1: f32,
 }
 impl WaveState {
     pub fn new(p: SynthP, seed: u32) -> WaveState {
@@ -392,50 +408,71 @@ impl WaveState {
         for (i, v) in ph.iter_mut().enumerate() {
             *v = ((seed.wrapping_mul(2654435761).wrapping_add(i as u32 * 40503)) >> 8) as f32 / (1u32 << 24) as f32;
         }
-        WaveState { p, ph, ic1: 0.0, ic2: 0.0, lfo: 0.0 }
+        WaveState { p, ph, ic1: 0.0, ic2: 0.0, lfo: 0.0, inc: [0.0; 16], nivel: [0.0; 16], pos: [0.0; 16], activos: 0, m_listo: f32::NAN, sr_listo: 0.0, cuenta: 0, fg: 0.0, fk: 2.0, fa1: 1.0 }
     }
     pub fn end_time(&self, len: f32) -> f32 {
         len + self.p.amp[3].max(0.005)
     }
-    #[inline]
-    pub fn next(&mut self, t: f32, len: f32, m: f32, vel: f32, sr: f32) -> f32 {
-        let p = &self.p;
-        let dt = 1.0 / sr;
-        self.lfo = (self.lfo + p.lfo_rate * dt).fract();
-        let lfo = (self.lfo * TAU).sin() * p.lfo_depth;
-        let mut sum = 0.0;
-        let mut slot = 0;
-        for o in p.osc.iter() {
-            let n = o.unison.clamp(1, 8) as usize;
+    /// Frecuencia (por muestra), volumen y forma de onda de cada oscilador del unísono para la nota `m`.
+    fn preparar(&mut self, m: f32, sr: f32) {
+        let mut k = 0;
+        for o in self.p.osc.iter() {
             if !o.on {
-                slot += n;
                 continue;
             }
-            let pitch = m + (o.oct * 12 + o.semi) as f32 + o.fine / 100.0 + if p.lfo_target == 2 { lfo * 2.0 } else { 0.0 };
-            let f0 = mtof(pitch);
-            let pos = o.wt + if p.lfo_target == 1 { lfo * 2.0 } else { 0.0 };
+            let n = o.unison.clamp(1, 8) as usize;
+            let f0 = mtof(m + (o.oct * 12 + o.semi) as f32 + o.fine / 100.0);
             let norm = o.level / (n as f32).sqrt();
             for u in 0..n {
-                if slot >= 16 {
+                if k >= 16 {
                     break;
                 }
                 let spread = if n > 1 { u as f32 / (n - 1) as f32 * 2.0 - 1.0 } else { 0.0 };
-                let f = f0 * 2f32.powf(spread * o.detune * 0.5 / 12.0);
-                self.ph[slot] = (self.ph[slot] + f * dt).fract();
-                sum += wt_sample(pos, self.ph[slot]) * norm;
-                slot += 1;
+                self.inc[k] = f0 * 2f32.powf(spread * o.detune * 0.5 / 12.0) / sr;
+                self.nivel[k] = norm;
+                self.pos[k] = o.wt;
+                k += 1;
             }
         }
-        // filtro de estado variable (TPT) con envolvente y LFO
-        let fe = adsr(t, len, &p.fadsr);
-        let mut fc = p.cutoff * 2f32.powf(p.fenv * fe * 6.0);
-        if p.lfo_target == 0 {
-            fc *= 2f32.powf(lfo * 2.0);
+        self.activos = k;
+        self.m_listo = m;
+        self.sr_listo = sr;
+        self.cuenta = 0;
+    }
+    #[inline]
+    pub fn next(&mut self, t: f32, len: f32, m: f32, vel: f32, sr: f32) -> f32 {
+        if m != self.m_listo || sr != self.sr_listo {
+            self.preparar(m, sr);
         }
-        let fc = fc.clamp(20.0, sr * 0.45);
-        let g = (PI * fc / sr).tan();
-        let k = 2.0 - 1.9 * p.reso.clamp(0.0, 1.0);
-        let a1 = 1.0 / (1.0 + g * (g + k));
+        let dt = 1.0 / sr;
+        let (rate, depth, target) = (self.p.lfo_rate, self.p.lfo_depth, self.p.lfo_target);
+        self.lfo = (self.lfo + rate * dt).fract();
+        let lfo = if depth != 0.0 { (self.lfo * TAU).sin() * depth } else { 0.0 };
+        let mul = if target == 2 && lfo != 0.0 { 2f32.powf(lfo * 2.0 / 12.0) } else { 1.0 };
+        let extra_pos = if target == 1 { lfo * 2.0 } else { 0.0 };
+        let tb = tables();
+        let mut sum = 0.0;
+        for k in 0..self.activos {
+            let ph = self.ph[k] + self.inc[k] * mul;
+            let ph = ph - ph.floor();
+            self.ph[k] = ph;
+            sum += wt_sample_t(tb, self.pos[k] + extra_pos, ph) * self.nivel[k];
+        }
+        // filtro de estado variable (TPT) con envolvente y LFO; los coeficientes cada 16 muestras
+        let p = &self.p;
+        if self.cuenta % 16 == 0 {
+            let fe = adsr(t, len, &p.fadsr);
+            let mut fc = p.cutoff * 2f32.powf(p.fenv * fe * 6.0);
+            if target == 0 && lfo != 0.0 {
+                fc *= 2f32.powf(lfo * 2.0);
+            }
+            let fc = fc.clamp(20.0, sr * 0.45);
+            self.fg = (PI * fc / sr).tan();
+            self.fk = 2.0 - 1.9 * p.reso.clamp(0.0, 1.0);
+            self.fa1 = 1.0 / (1.0 + self.fg * (self.fg + self.fk));
+        }
+        self.cuenta = self.cuenta.wrapping_add(1);
+        let (g, k, a1) = (self.fg, self.fk, self.fa1);
         let v3 = sum - self.ic2;
         let v1 = a1 * self.ic1 + g * a1 * v3;
         let v2 = self.ic2 + g * v1;

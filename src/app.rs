@@ -42,13 +42,14 @@ enum View {
     Mixer,
 }
 
-const ACCENT: Color32 = Color32::from_rgb(61, 139, 255);
-const ACCENT2: Color32 = Color32::from_rgb(128, 182, 255);
-const BG: Color32 = Color32::from_rgb(10, 11, 14);
-const PANEL: Color32 = Color32::from_rgb(19, 21, 25);
-const PANEL2: Color32 = Color32::from_rgb(31, 34, 40);
-const LINE: Color32 = Color32::from_rgb(43, 47, 55);
-const DIM: Color32 = Color32::from_rgb(137, 145, 158);
+// Paleta monocroma «metal líquido»: negro profundo, grises neutros y plata.
+const ACCENT: Color32 = Color32::from_gray(229);
+const ACCENT2: Color32 = Color32::from_gray(193);
+const BG: Color32 = Color32::from_gray(10);
+const PANEL: Color32 = Color32::from_gray(17);
+const PANEL2: Color32 = Color32::from_gray(27);
+const LINE: Color32 = Color32::from_gray(40);
+const DIM: Color32 = Color32::from_gray(125);
 const GREEN: Color32 = Color32::from_rgb(58, 214, 140);
 const RED: Color32 = Color32::from_rgb(255, 76, 80);
 
@@ -476,7 +477,7 @@ impl StudioApp {
                         r = Some(false);
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.add(egui::Button::new(RichText::new("Recuperar").strong().color(Color32::WHITE)).fill(ACCENT).min_size(Vec2::new(110.0, 32.0))).clicked() {
+                        if boton_metal(ui, "Recuperar", Vec2::new(130.0, 36.0)).clicked() {
                             r = Some(true);
                         }
                     });
@@ -533,7 +534,7 @@ impl StudioApp {
                         r = Some(0);
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.add(egui::Button::new(RichText::new("Guardar").strong().color(Color32::WHITE)).fill(ACCENT).min_size(Vec2::new(110.0, 32.0))).clicked() {
+                        if boton_metal(ui, "Guardar", Vec2::new(130.0, 36.0)).clicked() {
                             r = Some(1);
                         }
                         if ui.add(egui::Button::new("No guardar").min_size(Vec2::new(110.0, 32.0))).clicked() {
@@ -902,158 +903,203 @@ impl StudioApp {
 
     // ---------- barra superior ----------
     fn top_bar(&mut self, ui: &mut Ui, compact: bool) {
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            if let Some(t) = &self.logo {
-                ui.add(egui::Image::new(t).fit_to_exact_size(Vec2::splat(30.0)));
-            }
-            ui.label(RichText::new("NoName Studio").strong().size(16.0).color(Color32::WHITE));
-            ui.add_space(6.0);
-            let playing = self.playing();
-            let r = icon_button(ui, if playing { Ic::Pause } else { Ic::Play }, Vec2::new(40.0, 28.0), false, if playing { Some(ACCENT) } else { None });
-            if playing {
-                let k = (ui.input(|i| i.time) as f32 * 3.0).sin() * 0.5 + 0.5;
-                ui.painter().rect_stroke(r.rect.expand(2.0 + 2.0 * k), 11, Stroke::new(1.5, ACCENT.gamma_multiply(0.25 + 0.35 * (1.0 - k))), StrokeKind::Outside);
-            }
-            self.tut_mark("play", r.rect);
-            let play_rect = r.rect;
-            if r.on_hover_text("Reproducir / pausar (Espacio)").clicked() {
-                self.toggle_play();
-            }
-            if icon_button(ui, Ic::Stop, Vec2::new(40.0, 28.0), false, None).on_hover_text("Detener").clicked() {
-                self.stop();
-            }
-            let recording = self.rec_track.is_some() || self.rec.is_some();
-            if icon_button(ui, Ic::Rec, Vec2::new(36.0, 28.0), recording, if recording { Some(RED) } else { None }).on_hover_text("Grabar audio en la pista seleccionada (Ctrl+R). Con Bucle: una toma por vuelta. Con Punch: solo la región.").clicked() {
-                if self.rec_track.is_some() {
-                    self.rec_track_stop();
-                } else if self.rec.is_some() {
-                    self.rec_stop();
-                } else {
-                    self.rec_track_start();
-                }
-            }
-            self.rec_indicator(ui);
-            self.micro_boton(ui);
-            if ui.add(egui::Button::selectable(self.letras_panel, RichText::new("Letras").size(12.5)).min_size(Vec2::new(0.0, 28.0))).on_hover_text("Escribe la letra y notas de la canción (se guardan en el proyecto)").clicked() {
-                self.letras_panel = !self.letras_panel;
-            }
-            if ui.add(egui::Button::selectable(!self.song_mode, "PAT").min_size(Vec2::new(44.0, 28.0))).on_hover_text("Patrón en bucle").clicked() {
-                self.set_song_mode(false);
-            }
-            let r = ui.add(egui::Button::selectable(self.song_mode, "SONG").min_size(Vec2::new(50.0, 28.0)));
-            self.tut_mark("song", r.rect.union(play_rect));
-            if r.on_hover_text("Canción completa (playlist)").clicked() {
-                self.set_song_mode(true);
-            }
-            if icon_button(ui, Ic::Metro, Vec2::new(36.0, 28.0), self.metro, None).on_hover_text("Metrónomo (M)").clicked() {
-                self.metro = !self.metro;
-                self.cmd(Cmd::Metronome(self.metro));
-            }
-            // LCD
-            let s = if playing { self.status.pos().max(0.0) as u64 } else { 0 };
-            let lcd = format!("{:03}:{}:{:02}", s / 16 + 1, (s / 4) % 4 + 1, s % 4 + 1);
-            Frame::new().fill(Color32::from_rgb(11, 11, 13)).corner_radius(5).inner_margin(Margin::symmetric(10, 4)).show(ui, |ui| {
-                ui.label(RichText::new(lcd).monospace().size(16.0).color(ACCENT2));
+        if compact {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                self.barra_izq(ui, true, 0.0);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| self.barra_der(ui, false));
             });
-            ui.label(RichText::new("TEMPO").small().color(DIM));
-            let mut bpm = self.p.bpm;
-            let r = ui.add(egui::DragValue::new(&mut bpm).range(50.0..=200.0).speed(0.25).fixed_decimals(0).suffix(" bpm"));
-            self.track(&r);
-            if r.changed() {
-                self.p.bpm = bpm.round();
-                self.send();
-            }
-            ui.label(RichText::new("SWING").small().color(DIM)).on_hover_text("Clic: alterna swing de semicorcheas / corcheas");
-            let mut sw = self.p.swing;
-            ui.spacing_mut().slider_width = 64.0;
-            let r = ui.add(egui::Slider::new(&mut sw, 0.0..=0.5).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
-            self.track(&r);
-            if r.changed() {
-                self.p.swing = sw;
-                self.send();
-            }
-            if ui.add(egui::Button::selectable(self.p.swing8, if self.p.swing8 { "1/8" } else { "1/16" }).min_size(Vec2::new(34.0, 22.0))).on_hover_text("Swing sobre semicorcheas (1/16) o corcheas (1/8)").clicked() {
-                self.snap();
-                self.p.swing8 = !self.p.swing8;
-                self.send();
-            }
-            let mut name = self.p.name.clone();
-            let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(if compact { 110.0 } else { 150.0 }).hint_text("Nombre del proyecto"));
-            if r.changed() {
-                if r.gained_focus() || !self.hist.last().is_some_and(|h| h.name != self.p.name) {
-                    self.snap();
-                }
-                self.p.name = name;
-                self.send();
-            }
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let ancho = ui.available_width();
+            // la derecha tiene su lugar fijo; la izquierda usa lo que queda y nunca se monta encima
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let exporting = self.job.as_ref().map(|j| (j.progress.load(Ordering::Relaxed), j.fmt));
-                match exporting {
-                    Some((pr, f)) => {
-                        let label = format!("Exportando {}%{}", pr / 10, match f { Format::Wav => " (WAV)", Format::Stems => " (pistas)", _ => "" });
-                        let b = egui::Button::new(RichText::new(label).strong().color(Color32::WHITE)).fill(ACCENT).min_size(Vec2::new(124.0, 28.0));
-                        let r = ui.add_enabled(false, b);
-                        self.tut_mark("export", r.rect);
-                    }
-                    None => {
-                        let b = egui::Button::new(RichText::new("Exportar     ").strong().color(Color32::WHITE)).fill(ACCENT).min_size(Vec2::new(124.0, 28.0));
-                        let (r, _) = egui::containers::menu::MenuButton::from_button(b).ui(ui, |ui| self.export_menu(ui));
-                        // flechita dibujada (la fuente no trae el carácter)
-                        let c = Pos2::new(r.rect.right() - 16.0, r.rect.center().y);
-                        ui.painter().add(egui::Shape::convex_polygon(vec![c + Vec2::new(-5.0, -2.5), c + Vec2::new(5.0, -2.5), c + Vec2::new(0.0, 3.5)], Color32::from_rgb(21, 21, 25), Stroke::NONE));
-                        self.tut_mark("export", r.rect);
-                    }
-                }
-                let lufs = self.lufs_text();
-                if ui.add(egui::Button::new(RichText::new(lufs).monospace().size(12.0).color(ACCENT2)).min_size(Vec2::new(84.0, 28.0))).on_hover_text("Sonoridad (corto plazo). Clic: NN Master y mastering con un clic").clicked() {
-                    self.open_win(Win::Master);
-                }
-                ui.label(RichText::new(format!("CPU {:.0}%", self.load_hold * 100.0)).small().color(if self.load_hold > 0.8 { RED } else { DIM }));
-                if icon_button(ui, Ic::Gear, Vec2::new(34.0, 28.0), false, None).on_hover_text("Configuración").clicked() {
-                    self.open_win(Win::Settings);
-                }
-                ui.menu_button("Archivo", |ui| {
-                    if ui.button("Nuevo proyecto").clicked() {
-                        ui.close();
-                        self.pedir(Pend::Nuevo(usize::MAX));
-                    }
-                    if ui.button("Abrir proyecto…").clicked() {
-                        ui.close();
-                        self.pedir(Pend::Abrir);
-                    }
-                    if ui.button("Guardar  (Ctrl+S)").clicked() {
-                        ui.close();
-                        self.guardar(false);
-                    }
-                    if ui.button("Guardar como…").clicked() {
-                        ui.close();
-                        self.guardar(true);
-                    }
-                    ui.separator();
-                    if ui.add_enabled(self.job.is_none(), egui::Button::new(format!("Exportar WAV ({} bits)", self.settings.wav_bits))).clicked() {
-                        ui.close();
-                        self.start_export(Format::Wav);
-                    }
-                    if ui.button("Cargar beat de ejemplo").clicked() {
-                        ui.close();
-                        self.snap();
-                        self.p = Project::demo();
-                        self.fix_selection();
-                        self.send();
-                        self.reload_takes();
-                        self.plugins_reload_all();
-                        self.msg = "Beat de ejemplo cargado (Deshacer para volver).".into();
-                    }
-                    self.file_menu_extra(ui);
-                    ui.separator();
-                    ui.label(RichText::new(format!("Exporta en: {}", self.plat.export_dir.display())).small().color(DIM));
+                self.barra_der(ui, ancho > 1800.0);
+                ui.add_space(14.0);
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    let caja = ui.max_rect();
+                    ui.set_clip_rect(caja.intersect(ui.clip_rect()));
+                    self.barra_izq(ui, false, ancho);
                 });
-                if icon_button(ui, Ic::Undo, Vec2::new(36.0, 28.0), false, None).on_hover_text("Deshacer (Ctrl+Z)").clicked() {
-                    self.undo();
-                }
             });
         });
+    }
+
+    /// Barra de arriba, izquierda: logo, transporte, micrófono, letras, PAT/SONG, tempo, swing y nombre.
+    fn barra_izq(&mut self, ui: &mut Ui, compact: bool, ancho: f32) {
+        // lugar que de verdad queda para esta parte (lo de la derecha ya está puesto)
+        let _ = ancho;
+        let libre = if compact { f32::INFINITY } else { ui.available_width() };
+        // lo básico (transporte, tempo, swing y nombre) ocupa unos 1040 px; el título y los rótulos solo si caben
+        let extra = libre - 1040.0;
+        // el nombre de la app siempre se ve; si falta lugar se achica el cuadro del nombre del proyecto
+        let con_titulo = true;
+        let con_rotulos = extra > 235.0;
+        if let Some(t) = &self.logo {
+            ui.add(egui::Image::new(t).fit_to_exact_size(Vec2::splat(30.0))).on_hover_text(concat!("NoName Studio ", env!("CARGO_PKG_VERSION")));
+        }
+        if con_titulo {
+            ui.label(RichText::new("NoName Studio").strong().size(15.0).color(Color32::WHITE));
+        }
+        ui.add_space(6.0);
+        let playing = self.playing();
+        let r = icon_button(ui, if playing { Ic::Pause } else { Ic::Play }, Vec2::new(40.0, 28.0), false, if playing { Some(ACCENT) } else { None });
+        if playing {
+            let k = (ui.input(|i| i.time) as f32 * 3.0).sin() * 0.5 + 0.5;
+            ui.painter().rect_stroke(r.rect.expand(2.0 + 2.0 * k), 11, Stroke::new(1.5, ACCENT.gamma_multiply(0.25 + 0.35 * (1.0 - k))), StrokeKind::Outside);
+        }
+        self.tut_mark("play", r.rect);
+        let play_rect = r.rect;
+        if r.on_hover_text("Reproducir / pausar (Espacio)").clicked() {
+            self.toggle_play();
+        }
+        if icon_button(ui, Ic::Stop, Vec2::new(40.0, 28.0), false, None).on_hover_text("Detener").clicked() {
+            self.stop();
+        }
+        let recording = self.rec_track.is_some() || self.rec.is_some();
+        if icon_button(ui, Ic::Rec, Vec2::new(36.0, 28.0), recording, if recording { Some(RED) } else { None }).on_hover_text("Grabar audio en la pista seleccionada (Ctrl+R). Con Bucle: una toma por vuelta. Con Punch: solo la región.").clicked() {
+            if self.rec_track.is_some() {
+                self.rec_track_stop();
+            } else if self.rec.is_some() {
+                self.rec_stop();
+            } else {
+                self.rec_track_start();
+            }
+        }
+        self.rec_indicator(ui);
+        self.micro_boton(ui);
+        if ui.add(egui::Button::selectable(self.letras_panel, RichText::new("Letras").size(12.5)).min_size(Vec2::new(0.0, 28.0))).on_hover_text("Escribe la letra y notas de la canción (se guardan en el proyecto)").clicked() {
+            self.letras_panel = !self.letras_panel;
+        }
+        if ui.add(egui::Button::selectable(!self.song_mode, "PAT").min_size(Vec2::new(44.0, 28.0))).on_hover_text("Patrón en bucle").clicked() {
+            self.set_song_mode(false);
+        }
+        let r = ui.add(egui::Button::selectable(self.song_mode, "SONG").min_size(Vec2::new(50.0, 28.0)));
+        self.tut_mark("song", r.rect.union(play_rect));
+        if r.on_hover_text("Canción completa (playlist)").clicked() {
+            self.set_song_mode(true);
+        }
+        if icon_button(ui, Ic::Metro, Vec2::new(36.0, 28.0), self.metro, None).on_hover_text("Metrónomo (M)").clicked() {
+            self.metro = !self.metro;
+            self.cmd(Cmd::Metronome(self.metro));
+        }
+        // LCD
+        let s = if playing { self.status.pos().max(0.0) as u64 } else { 0 };
+        let lcd = format!("{:03}:{}:{:02}", s / 16 + 1, (s / 4) % 4 + 1, s % 4 + 1);
+        Frame::new().fill(Color32::from_gray(12)).corner_radius(5).inner_margin(Margin::symmetric(10, 4)).show(ui, |ui| {
+            ui.label(RichText::new(lcd).monospace().size(16.0).color(ACCENT2));
+        });
+        if con_rotulos {
+            ui.label(RichText::new("TEMPO").small().color(DIM));
+        }
+        let mut bpm = self.p.bpm;
+        let r = ui.add(egui::DragValue::new(&mut bpm).range(50.0..=200.0).speed(0.25).fixed_decimals(0).suffix(" bpm"));
+        self.track(&r);
+        if r.changed() {
+            self.p.bpm = bpm.round();
+            self.send();
+        }
+        if con_rotulos {
+            ui.label(RichText::new("SWING").small().color(DIM));
+        }
+        let mut sw = self.p.swing;
+        ui.spacing_mut().slider_width = 64.0;
+        let r = ui.add(egui::Slider::new(&mut sw, 0.0..=0.5).custom_formatter(|v, _| format!("{:.0}%", v * 100.0))).on_hover_text("Swing: atrasa un poco los golpes pares para que suene con más groove");
+        self.track(&r);
+        if r.changed() {
+            self.p.swing = sw;
+            self.send();
+        }
+        if ui.add(egui::Button::selectable(self.p.swing8, if self.p.swing8 { "1/8" } else { "1/16" }).min_size(Vec2::new(34.0, 22.0))).on_hover_text("Swing sobre semicorcheas (1/16) o corcheas (1/8)").clicked() {
+            self.snap();
+            self.p.swing8 = !self.p.swing8;
+            self.send();
+        }
+        let mut name = self.p.name.clone();
+        // el nombre usa el espacio que sobra (sin meterse debajo de lo de la derecha)
+        let w_nombre = if compact { 110.0 } else { (ui.available_width() - 6.0).min(200.0) };
+        if w_nombre < 60.0 {
+            return;
+        }
+        let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(w_nombre).hint_text("Nombre del proyecto"));
+        if r.changed() {
+            if r.gained_focus() || !self.hist.last().is_some_and(|h| h.name != self.p.name) {
+                self.snap();
+            }
+            self.p.name = name;
+            self.send();
+        }
+    }
+
+    /// Barra de arriba, derecha (de derecha a izquierda): Exportar, sonoridad, CPU, ajustes, Archivo y deshacer.
+    fn barra_der(&mut self, ui: &mut Ui, cpu: bool) {
+        let exporting = self.job.as_ref().map(|j| (j.progress.load(Ordering::Relaxed), j.fmt));
+        match exporting {
+            Some((pr, f)) => {
+                let label = format!("Exportando {}%{}", pr / 10, match f { Format::Wav => " (WAV)", Format::Stems => " (pistas)", _ => "" });
+                let b = egui::Button::new(RichText::new(label).strong().color(Color32::from_gray(21))).fill(ACCENT).min_size(Vec2::new(124.0, 30.0));
+                let r = ui.add_enabled(false, b);
+                self.tut_mark("export", r.rect);
+            }
+            None => {
+                // botón de metal líquido; el clic abre las opciones de exportar
+                let r = boton_metal(ui, "Exportar", Vec2::new(124.0, 34.0));
+                egui::Popup::menu(&r).show(|ui| self.export_menu(ui));
+                self.tut_mark("export", r.rect);
+            }
+        }
+        let lufs = self.lufs_text();
+        if ui.add(egui::Button::new(RichText::new(lufs).monospace().size(12.0).color(ACCENT2)).min_size(Vec2::new(84.0, 28.0))).on_hover_text("Sonoridad (corto plazo). Clic: NN Master y mastering con un clic").clicked() {
+            self.open_win(Win::Master);
+        }
+        // el uso de CPU solo se muestra si sobra lugar (o si está alto)
+        if cpu || self.load_hold > 0.8 {
+            ui.label(RichText::new(format!("CPU {:.0}%", self.load_hold * 100.0)).small().color(if self.load_hold > 0.8 { RED } else { DIM }));
+        }
+        if icon_button(ui, Ic::Gear, Vec2::new(34.0, 28.0), false, None).on_hover_text("Configuración").clicked() {
+            self.open_win(Win::Settings);
+        }
+        ui.menu_button("Archivo", |ui| {
+            if ui.button("Nuevo proyecto").clicked() {
+                ui.close();
+                self.pedir(Pend::Nuevo(usize::MAX));
+            }
+            if ui.button("Abrir proyecto…").clicked() {
+                ui.close();
+                self.pedir(Pend::Abrir);
+            }
+            if ui.button("Guardar  (Ctrl+S)").clicked() {
+                ui.close();
+                self.guardar(false);
+            }
+            if ui.button("Guardar como…").clicked() {
+                ui.close();
+                self.guardar(true);
+            }
+            ui.separator();
+            if ui.add_enabled(self.job.is_none(), egui::Button::new(format!("Exportar WAV ({} bits)", self.settings.wav_bits))).clicked() {
+                ui.close();
+                self.start_export(Format::Wav);
+            }
+            if ui.button("Cargar beat de ejemplo").clicked() {
+                ui.close();
+                self.snap();
+                self.p = Project::demo();
+                self.fix_selection();
+                self.send();
+                self.reload_takes();
+                self.plugins_reload_all();
+                self.msg = "Beat de ejemplo cargado (Deshacer para volver).".into();
+            }
+            self.file_menu_extra(ui);
+            ui.separator();
+            ui.label(RichText::new(format!("Exporta en: {}", self.plat.export_dir.display())).small().color(DIM));
+        });
+        if icon_button(ui, Ic::Undo, Vec2::new(36.0, 28.0), false, None).on_hover_text("Deshacer (Ctrl+Z)").clicked() {
+            self.undo();
+        }
     }
 
     /// Opciones del botón «Exportar».
@@ -1103,7 +1149,7 @@ impl StudioApp {
             let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::click());
             let painter = ui.painter();
             if sel {
-                painter.rect(r, 5, Color32::from_rgb(28, 29, 33), Stroke::new(1.0, ACCENT), StrokeKind::Inside);
+                painter.rect(r, 5, Color32::from_gray(30), Stroke::new(1.0, ACCENT), StrokeKind::Inside);
             } else if resp.hovered() {
                 painter.rect_filled(r, 5, PANEL2);
             }
@@ -1169,7 +1215,7 @@ impl StudioApp {
 
     // ---------- playlist ----------
     fn playlist(&mut self, ui: &mut Ui) {
-        egui::Panel::left("patlist").resizable(true).default_size(190.0).min_size(150.0).frame(Frame::new().fill(Color32::from_rgb(24, 25, 29)).inner_margin(6)).show(ui, |ui| {
+        egui::Panel::left("patlist").resizable(true).default_size(190.0).min_size(150.0).frame(Frame::new().fill(Color32::from_gray(26)).inner_margin(6)).show(ui, |ui| {
             ui.horizontal(|ui| {
                 for (i, n) in [(0u8, "Patrones"), (1, "Navegador")] {
                     let r = ui.add(egui::Button::selectable(self.left_tab == i, n));
@@ -1269,7 +1315,7 @@ impl StudioApp {
             ui.add_space(8.0);
             ui.spacing_mut().slider_width = 52.0;
             let (r, led) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
-            ui.painter().circle(r.center(), 6.5, if c.mute { Color32::from_rgb(40, 42, 48) } else { GREEN }, Stroke::new(1.0, Color32::BLACK));
+            ui.painter().circle(r.center(), 6.5, if c.mute { Color32::from_gray(43) } else { GREEN }, Stroke::new(1.0, Color32::BLACK));
             if led.on_hover_text("Silenciar").clicked() {
                 self.snap();
                 if let Some(cm) = self.p.channel_mut(id) {
@@ -1323,7 +1369,7 @@ impl StudioApp {
             if c.inst == Inst::Vocal {
                 let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 28.0), Sense::click());
                 let painter = ui.painter_at(rect);
-                painter.rect_filled(rect, 3, Color32::from_rgb(30, 31, 35));
+                painter.rect_filled(rect, 3, Color32::from_gray(32));
                 let recording = self.rec.as_ref().is_some_and(|r| r.ch == id);
                 match self.takes.get(&(pat.id, id)) {
                     Some(v) if !recording => {
@@ -1338,7 +1384,7 @@ impl StudioApp {
                     }
                     _ if recording => {
                         // forma de onda en vivo sobre el largo del patrón
-                        painter.rect_filled(rect, 3, Color32::from_rgb(20, 22, 74));
+                        painter.rect_filled(rect, 3, Color32::from_gray(28));
                         let total = (pat.len_steps() as f64 * self.p.step_secs()) as f32;
                         self.rec_draw(&painter, rect, rect.width() / total.max(0.1), 0.0, total);
                         painter.text(rect.left_top() + Vec2::new(6.0, 2.0), Align2::LEFT_TOP, "GRABANDO", FontId::proportional(10.0), Color32::WHITE);
@@ -1353,10 +1399,10 @@ impl StudioApp {
             } else if c.inst == Inst::Audio {
                 let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 28.0), Sense::click());
                 let painter = ui.painter_at(rect);
-                painter.rect_filled(rect, 3, Color32::from_rgb(33, 34, 39));
+                painter.rect_filled(rect, 3, Color32::from_gray(35));
                 let n = self.p.audio_clips.iter().filter(|a| a.ch == id).count();
                 let t = if n == 0 { "Pista de audio — importa un audio o graba con el botón rojo para crear clips en la playlist".to_string() } else { format!("Pista de audio — {n} clips en la playlist") };
-                painter.text(rect.left_center() + Vec2::new(8.0, 0.0), Align2::LEFT_CENTER, t, FontId::proportional(11.0), Color32::from_rgb(150, 200, 220));
+                painter.text(rect.left_center() + Vec2::new(8.0, 0.0), Align2::LEFT_CENTER, t, FontId::proportional(11.0), Color32::from_gray(205));
                 if resp.clicked() {
                     self.sel_ch = id;
                     self.show_playlist = true;
@@ -1370,7 +1416,7 @@ impl StudioApp {
                 let steps = pat.steps.get(&id).cloned().unwrap_or_default();
                 for i in 0..n {
                     let r = Rect::from_min_size(Pos2::new(rect.left() + step_x(i), rect.top()), Vec2::new(22.0, 28.0));
-                    painter.rect_filled(r, 3, if (i / 4) % 2 == 1 { Color32::from_rgb(52, 53, 61) } else { Color32::from_rgb(43, 45, 51) });
+                    painter.rect_filled(r, 3, if (i / 4) % 2 == 1 { Color32::from_gray(55) } else { Color32::from_gray(46) });
                     let v = steps.get(i).copied().unwrap_or(0.0);
                     let suena = cur_step == Some(i);
                     if v > 0.0 {
@@ -1435,7 +1481,7 @@ impl StudioApp {
             } else {
                 let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 28.0), Sense::click());
                 let painter = ui.painter_at(rect);
-                painter.rect_filled(rect, 3, Color32::from_rgb(36, 37, 43));
+                painter.rect_filled(rect, 3, Color32::from_gray(39));
                 let ns = pat.notes.get(&id).cloned().unwrap_or_default();
                 if ns.is_empty() {
                     painter.text(rect.left_center() + Vec2::new(8.0, 0.0), Align2::LEFT_CENTER, "Vacío — toca para escribir notas en el piano roll", FontId::proportional(11.0), DIM);
@@ -1664,18 +1710,18 @@ impl StudioApp {
                     let y = row_y(m);
                     let pc = (m % 12) as usize;
                     let col = if self.p.in_scale(m as i32) {
-                        if pc == key as usize % 12 { Color32::from_rgb(26, 45, 78) } else { Color32::from_rgb(41, 43, 49) }
+                        if pc == key as usize % 12 { Color32::from_gray(62) } else { Color32::from_gray(44) }
                     } else if is_black(m) {
-                        Color32::from_rgb(23, 24, 28)
+                        Color32::from_gray(25)
                     } else {
-                        Color32::from_rgb(28, 29, 33)
+                        Color32::from_gray(30)
                     };
                     painter.rect_filled(Rect::from_min_size(Pos2::new(gx, y), Vec2::new(steps as f32 * CW, RH)), 0, col);
-                    painter.hline(gx..=rect.right(), y + RH - 0.5, Stroke::new(1.0, Color32::from_rgb(22, 23, 26)));
+                    painter.hline(gx..=rect.right(), y + RH - 0.5, Stroke::new(1.0, Color32::from_gray(24)));
                 }
                 for s in 0..=steps {
                     let x = gx + s as f32 * CW;
-                    let (w, c) = if s % 16 == 0 { (2.0, Color32::from_rgb(11, 11, 14)) } else if s % 4 == 0 { (1.0, Color32::from_rgb(20, 21, 24)) } else { (1.0, Color32::from_rgb(27, 28, 33)) };
+                    let (w, c) = if s % 16 == 0 { (2.0, Color32::from_gray(12)) } else if s % 4 == 0 { (1.0, Color32::from_gray(22)) } else { (1.0, Color32::from_gray(29)) };
                     painter.vline(x, rect.top()..=rect.bottom(), Stroke::new(w, c));
                 }
                 // notas fantasma de otros canales
@@ -1694,7 +1740,7 @@ impl StudioApp {
                     painter.rect_filled(r, 2, c32(pat.color).gamma_multiply(a));
                     painter.rect_filled(Rect::from_min_max(Pos2::new(r.right() - 4.0, r.top() + 1.0), Pos2::new(r.right() - 1.0, r.bottom() - 1.0)), 1, Color32::from_black_alpha(130));
                     if r.width() > 34.0 {
-                        painter.text(r.left_center() + Vec2::new(3.0, 0.0), Align2::LEFT_CENTER, nname(n.m), FontId::proportional(9.0), Color32::from_rgb(12, 12, 14));
+                        painter.text(r.left_center() + Vec2::new(3.0, 0.0), Align2::LEFT_CENTER, nname(n.m), FontId::proportional(9.0), Color32::from_gray(13));
                     }
                 }
                 if let Some(ls) = self.local_step() {
@@ -1705,13 +1751,13 @@ impl StudioApp {
                 for m in LOW..=HIGH {
                     let y = row_y(m);
                     let r = Rect::from_min_size(Pos2::new(kx, y), Vec2::new(KW, RH));
-                    painter.rect_filled(r, 0, if is_black(m) { Color32::from_rgb(20, 21, 24) } else { Color32::from_rgb(232, 232, 232) });
+                    painter.rect_filled(r, 0, if is_black(m) { Color32::from_gray(22) } else { Color32::from_rgb(232, 232, 232) });
                     painter.hline(kx..=kx + KW, y + RH - 0.5, Stroke::new(1.0, Color32::from_black_alpha(80)));
                     if self.p.in_scale(m as i32) {
                         painter.rect_filled(Rect::from_min_size(Pos2::new(kx + KW - 5.0, y), Vec2::new(5.0, RH)), 0, if m % 12 == key % 12 { ACCENT } else { ACCENT.gamma_multiply(0.4) });
                     }
                     if m % 12 == 0 || m % 12 == key % 12 {
-                        painter.text(Pos2::new(kx + 4.0, y + RH / 2.0), Align2::LEFT_CENTER, nname(m), FontId::proportional(9.5), if is_black(m) { Color32::LIGHT_GRAY } else { Color32::from_rgb(27, 28, 32) });
+                        painter.text(Pos2::new(kx + 4.0, y + RH / 2.0), Align2::LEFT_CENTER, nname(m), FontId::proportional(9.5), if is_black(m) { Color32::LIGHT_GRAY } else { Color32::from_gray(29) });
                     }
                 }
                 self.roll_input(ui, &resp, rect, kx, ch, steps);
@@ -1845,14 +1891,14 @@ impl StudioApp {
         let (rect, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0, BG);
-        painter.hline(rect.left()..=rect.right(), rect.top() + 0.5, Stroke::new(2.0, Color32::from_rgb(12, 12, 14)));
+        painter.hline(rect.left()..=rect.right(), rect.top() + 0.5, Stroke::new(2.0, Color32::from_gray(13)));
         let pat = self.cur_pat().clone();
         let gx = rect.left() + KW - self.roll_x;
         let h = rect.height() - 10.0;
         for s in (0..=pat.len_steps()).step_by(4) {
             let x = gx + s as f32 * CW;
             if x > rect.left() + KW {
-                painter.vline(x, rect.top()..=rect.bottom(), Stroke::new(1.0, if s % 16 == 0 { Color32::from_rgb(11, 11, 14) } else { Color32::from_rgb(29, 30, 34) }));
+                painter.vline(x, rect.top()..=rect.bottom(), Stroke::new(1.0, if s % 16 == 0 { Color32::from_gray(12) } else { Color32::from_gray(31) }));
             }
         }
         if let Some(ns) = pat.notes.get(&ch) {
@@ -1866,7 +1912,7 @@ impl StudioApp {
                 painter.circle_filled(Pos2::new(x, top), 3.5, c32(pat.color));
             }
         }
-        painter.rect_filled(Rect::from_min_size(rect.min, Vec2::new(KW, rect.height())), 0, Color32::from_rgb(23, 24, 28));
+        painter.rect_filled(Rect::from_min_size(rect.min, Vec2::new(KW, rect.height())), 0, Color32::from_gray(25));
         painter.text(rect.left_top() + Vec2::new(6.0, 8.0), Align2::LEFT_TOP, "VEL.", FontId::proportional(10.0), DIM);
         if resp.drag_started() || resp.clicked() {
             self.snap();
@@ -1917,7 +1963,7 @@ impl StudioApp {
         let mut touched = false;
         let mut started = false;
         let (mut open_eq, mut open_comp, mut open_fx) = (false, false, false);
-        Frame::new().fill(Color32::from_rgb(23, 24, 28)).stroke(Stroke::new(1.0, Color32::from_rgb(12, 12, 14))).corner_radius(6).inner_margin(6).show(ui, |ui| {
+        Frame::new().fill(Color32::from_gray(25)).stroke(Stroke::new(1.0, Color32::from_gray(13))).corner_radius(6).inner_margin(6).show(ui, |ui| {
             ui.set_width(96.0);
             ui.vertical_centered(|ui| {
                 ui.label(RichText::new(&c.name).strong().size(12.0));
@@ -2024,7 +2070,7 @@ impl StudioApp {
     }
 
     fn master_strip(&mut self, ui: &mut Ui) {
-        Frame::new().fill(Color32::from_rgb(22, 23, 27)).stroke(Stroke::new(1.0, Color32::from_rgb(12, 46, 94))).corner_radius(6).inner_margin(6).show(ui, |ui| {
+        Frame::new().fill(Color32::from_gray(24)).stroke(Stroke::new(1.0, Color32::from_gray(70))).corner_radius(6).inner_margin(6).show(ui, |ui| {
             ui.set_width(104.0);
             ui.vertical_centered(|ui| {
                 ui.label(RichText::new("Master").strong().size(12.0));
@@ -2082,8 +2128,7 @@ impl StudioApp {
             };
             for &(v, n) in tabs {
                 let sel = self.view == v || (!compact && v == View::Rack && self.view == View::Playlist);
-                let b = egui::Button::selectable(sel, RichText::new(n).color(if sel { Color32::WHITE } else { Color32::LIGHT_GRAY })).min_size(Vec2::new(if compact { 0.0 } else { 120.0 }, 28.0));
-                let r = ui.add(b);
+                let r = pestana_metal(ui, sel, n, if compact { 0.0 } else { 130.0 });
                 if v == View::Mixer {
                     self.tut_mark("mixer", r.rect);
                 }
@@ -2096,7 +2141,7 @@ impl StudioApp {
             }
             if !compact {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.add(egui::Button::selectable(self.show_playlist, "Playlist  F5")).clicked() {
+                    if pestana_metal(ui, self.show_playlist, "Playlist  F5", 120.0).clicked() {
                         self.show_playlist = !self.show_playlist;
                     }
                 });
@@ -2119,6 +2164,12 @@ impl StudioApp {
             ui.label(RichText::new(&self.msg).size(12.0).color(DIM));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(6.0);
+                // la marca siempre a la vista, en la esquina
+                ui.label(RichText::new(concat!("NoName Studio ", env!("CARGO_PKG_VERSION"))).size(11.5).strong().color(Color32::from_gray(207)));
+                if let Some(t) = &self.logo {
+                    ui.add(egui::Image::new(t).fit_to_exact_size(Vec2::splat(15.0)));
+                }
+                ui.add_space(10.0);
                 if let Some(a) = &self.audio {
                     ui.label(RichText::new(format!("Audio: {} · {} Hz", a.device, a.sr)).size(11.0).color(DIM));
                 }
@@ -2201,7 +2252,7 @@ impl eframe::App for StudioApp {
                 self.rec_stop();
             }
         }
-        if self.rec.is_some() || self.tune_busy > 0 || !self.wins.is_empty() {
+        if self.rec.is_some() || self.tune_busy > 0 {
             ctx.request_repaint_after(Duration::from_millis(33));
         }
         self.shortcuts(&ctx);
@@ -2219,13 +2270,17 @@ impl eframe::App for StudioApp {
         for k in 0..2 {
             self.mmeter[k] = mp[k].max(self.mmeter[k] * 0.88);
         }
+        // mientras suena: 30 cuadros por segundo (el cabezal y los vúmetros se ven fluidos y gasta la mitad que a 60)
         if self.playing() || self.job.is_some() || self.meters.iter().any(|m| *m > 0.001) {
-            ctx.request_repaint_after(Duration::from_millis(16));
+            ctx.request_repaint_after(Duration::from_millis(33));
         }
         let compact = self.plat.mobile || ui.available_width() < 900.0;
 
-        egui::Panel::top("top").frame(Frame::new().fill(Color32::from_rgb(30, 31, 35)).inner_margin(Margin::symmetric(10, 6))).show(ui, |ui| self.top_bar(ui, compact));
-        egui::Panel::bottom("status").frame(Frame::new().fill(Color32::from_rgb(14, 14, 17)).inner_margin(Margin::symmetric(4, 3))).show(ui, |ui| self.status_bar(ui));
+        egui::Panel::top("top").frame(Frame::new().fill(BG).inner_margin(Margin::symmetric(10, 7))).show(ui, |ui| {
+            // barra de arriba en forma de píldora, gris muy oscuro con borde sutil
+            Frame::new().fill(Color32::from_gray(20)).stroke(Stroke::new(1.0, Color32::from_gray(38))).corner_radius(99).inner_margin(Margin::symmetric(14, 4)).show(ui, |ui| self.top_bar(ui, compact));
+        });
+        egui::Panel::bottom("status").frame(Frame::new().fill(Color32::from_gray(15)).inner_margin(Margin::symmetric(4, 3))).show(ui, |ui| self.status_bar(ui));
         let mut abierto = self.mic_panel;
         egui::Panel::bottom("micro").frame(Frame::new().fill(PANEL).inner_margin(Margin::symmetric(14, 10)).stroke(Stroke::new(1.0, LINE))).show_collapsible(ui, &mut abierto, |ui| self.micro_panel(ui));
         self.mic_panel = abierto && self.mic_panel;
@@ -2254,14 +2309,14 @@ impl eframe::App for StudioApp {
         });
         self.letras_panel = ver_letras && self.letras_panel;
         if compact {
-            egui::Panel::top("tabs").frame(Frame::new().fill(Color32::from_rgb(16, 17, 20)).inner_margin(Margin::symmetric(0, 4))).show(ui, |ui| self.view_tabs(ui, true));
+            egui::Panel::top("tabs").frame(Frame::new().fill(Color32::from_gray(18)).inner_margin(Margin::symmetric(0, 4))).show(ui, |ui| self.view_tabs(ui, true));
             let v = self.view;
             egui::CentralPanel::default().frame(Frame::new().fill(PANEL)).show(ui, |ui| self.show_view(ui, v));
         } else {
             if self.show_playlist {
                 egui::Panel::top("playlist").resizable(true).default_size(ui.available_height() * 0.4).min_size(120.0).frame(Frame::new().fill(PANEL)).show(ui, |ui| self.playlist(ui));
             }
-            egui::Panel::top("docktabs").frame(Frame::new().fill(Color32::from_rgb(16, 17, 20)).inner_margin(Margin::symmetric(0, 4))).show(ui, |ui| self.view_tabs(ui, false));
+            egui::Panel::top("docktabs").frame(Frame::new().fill(Color32::from_gray(18)).inner_margin(Margin::symmetric(0, 4))).show(ui, |ui| self.view_tabs(ui, false));
             let v = if self.view == View::Playlist { View::Rack } else { self.view };
             egui::CentralPanel::default().frame(Frame::new().fill(PANEL)).show(ui, |ui| self.show_view(ui, v));
         }
@@ -2359,12 +2414,12 @@ fn icon_button(ui: &mut Ui, ic: Ic, size: Vec2, selected: bool, fill: Option<Col
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let t = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.12);
     let base = fill.unwrap_or(if selected { ACCENT } else { PANEL2 });
-    let hover = if fill.is_some() || selected { base.gamma_multiply(1.15) } else { Color32::from_rgb(50, 55, 64) };
+    let hover = if fill.is_some() || selected { base.gamma_multiply(1.15) } else { Color32::from_gray(56) };
     let bg = lerp_col(base, hover, t);
     let p = ui.painter();
     let r = rect.expand(t * 0.8);
     p.rect_filled(r, (size.y * 0.5).min(9.0), bg);
-    let col = if selected || fill.is_some() { Color32::WHITE } else { lerp_col(Color32::from_rgb(214, 219, 226), Color32::WHITE, t) };
+    let col = if selected || fill.is_some() { Color32::WHITE } else { lerp_col(Color32::from_gray(220), Color32::WHITE, t) };
     draw_icon(p, ic, rect.center(), rect.height().min(rect.width()) * 0.3, col);
     resp
 }
@@ -2449,7 +2504,7 @@ fn knob(ui: &mut Ui, val: &mut f32, min: f32, max: f32, def: f32, label: &str, f
         let p = ui.painter();
         let c = rect.center();
         let r = 12.0;
-        p.circle_filled(c, r, Color32::from_rgb(17, 18, 21));
+        p.circle_filled(c, r, Color32::from_gray(19));
         let a0 = std::f32::consts::PI * 0.75;
         let span = std::f32::consts::PI * 1.5;
         let frac = ((*val - min) / (max - min)).clamp(0.0, 1.0);
@@ -2461,7 +2516,7 @@ fn knob(ui: &mut Ui, val: &mut f32, min: f32, max: f32, def: f32, label: &str, f
             }).collect();
             p.add(egui::Shape::line(pts, Stroke::new(3.0, col)));
         };
-        arc(a0, a0 + span, Color32::from_rgb(40, 41, 47));
+        arc(a0, a0 + span, Color32::from_gray(43));
         // los controles bipolares se pintan desde el centro
         let zero = if min < 0.0 && max > 0.0 { (0.0 - min) / (max - min) } else { 0.0 };
         let (fa, fb) = if frac >= zero { (zero, frac) } else { (frac, zero) };
@@ -2479,7 +2534,7 @@ fn knob(ui: &mut Ui, val: &mut f32, min: f32, max: f32, def: f32, label: &str, f
 fn meter(ui: &mut Ui, size: Vec2, peak: f32) {
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     let p = ui.painter();
-    p.rect_filled(rect, 3, Color32::from_rgb(9, 9, 11));
+    p.rect_filled(rect, 3, Color32::from_gray(10));
     let db = if peak > 0.0 { 20.0 * peak.log10() } else { -99.0 };
     let f = ((db + 48.0) / 48.0).clamp(0.0, 1.0);
     if f > 0.0 {
@@ -2523,18 +2578,10 @@ fn draw_pattern_preview(p: &egui::Painter, r: Rect, pat: &Pattern) {
 }
 
 fn load_logo(ctx: &egui::Context) -> Option<egui::TextureHandle> {
-    // El logo es negro sobre blanco: lo convertimos en blanco sobre transparente para el tema oscuro.
+    // el diamante de NoName Studio, con su fondo transparente, tal cual
     let img = image::load_from_memory(crate::ICON_PNG).ok()?.to_rgba8();
-    let img = image::imageops::resize(&img, 96, 96, image::imageops::FilterType::Lanczos3);
-    let mut px = img.into_raw();
-    for c in px.chunks_mut(4) {
-        let lum = (c[0] as u32 * 299 + c[1] as u32 * 587 + c[2] as u32 * 114) / 1000;
-        c[0] = 255;
-        c[1] = 255;
-        c[2] = 255;
-        c[3] = (255 - lum.min(255)) as u8;
-    }
-    let ci = egui::ColorImage::from_rgba_unmultiplied([96, 96], &px);
+    let img = image::imageops::resize(&img, 128, 128, image::imageops::FilterType::Lanczos3);
+    let ci = egui::ColorImage::from_rgba_unmultiplied([128, 128], &img.into_raw());
     Some(ctx.load_texture("logo", ci, egui::TextureOptions::LINEAR))
 }
 
@@ -2543,31 +2590,33 @@ fn setup_style(ctx: &egui::Context, mobile: bool) {
     v.panel_fill = BG;
     v.window_fill = PANEL;
     v.faint_bg_color = PANEL;
-    v.extreme_bg_color = Color32::from_rgb(14, 15, 18);
-    // lo elegido va en azul con letra blanca
-    v.selection.bg_fill = ACCENT;
-    v.selection.stroke = Stroke::new(1.0, Color32::WHITE);
+    v.extreme_bg_color = Color32::from_gray(13);
+    // lo elegido: píldora blanca con letra oscura
+    v.selection.bg_fill = Color32::from_gray(244);
+    v.selection.stroke = Stroke::new(1.0, Color32::from_gray(21));
     v.hyperlink_color = ACCENT2;
     v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, LINE);
-    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(214, 219, 226));
+    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, Color32::from_gray(213));
     v.widgets.inactive.bg_fill = PANEL2;
     v.widgets.inactive.weak_bg_fill = PANEL2;
-    v.widgets.inactive.bg_stroke = Stroke::NONE;
-    v.widgets.inactive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(222, 226, 232));
-    v.widgets.hovered.weak_bg_fill = Color32::from_rgb(44, 48, 56);
-    v.widgets.hovered.bg_fill = Color32::from_rgb(44, 48, 56);
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(70, 76, 88));
+    v.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_gray(37));
+    v.widgets.inactive.fg_stroke = Stroke::new(1.0, Color32::from_gray(213));
+    v.widgets.hovered.weak_bg_fill = Color32::from_gray(40);
+    v.widgets.hovered.bg_fill = Color32::from_gray(40);
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_gray(85));
     v.widgets.hovered.fg_stroke = Stroke::new(1.0, Color32::WHITE);
     v.widgets.hovered.expansion = 0.5;
-    v.widgets.active.weak_bg_fill = ACCENT.gamma_multiply(0.8);
-    v.widgets.active.bg_fill = ACCENT.gamma_multiply(0.8);
+    v.widgets.active.weak_bg_fill = Color32::from_gray(65);
+    v.widgets.active.bg_fill = Color32::from_gray(65);
     v.widgets.active.fg_stroke = Stroke::new(1.0, Color32::WHITE);
-    v.widgets.open.weak_bg_fill = Color32::from_rgb(44, 48, 56);
-    for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open, &mut v.widgets.noninteractive] {
-        w.corner_radius = CornerRadius::same(8);
+    v.widgets.open.weak_bg_fill = Color32::from_gray(40);
+    // botones, menús y campos en forma de píldora
+    for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
+        w.corner_radius = CornerRadius::same(99);
     }
-    v.window_corner_radius = CornerRadius::same(12);
-    v.menu_corner_radius = CornerRadius::same(10);
+    v.widgets.noninteractive.corner_radius = CornerRadius::same(10);
+    v.window_corner_radius = CornerRadius::same(16);
+    v.menu_corner_radius = CornerRadius::same(14);
     v.window_stroke = Stroke::new(1.0, LINE);
     v.window_shadow = egui::Shadow { offset: [0, 10], blur: 28, spread: 0, color: Color32::from_black_alpha(150) };
     v.popup_shadow = egui::Shadow { offset: [0, 6], blur: 18, spread: 0, color: Color32::from_black_alpha(140) };
@@ -2583,4 +2632,122 @@ fn setup_style(ctx: &egui::Context, mobile: bool) {
             s.spacing.interact_size.y = 30.0;
         }
     });
+}
+
+// ============================ metal líquido ============================
+
+/// Contorno de una píldora (rectángulo con extremos redondos) como puntos, en orden.
+fn contorno_pildora(r: Rect, n: usize) -> Vec<Pos2> {
+    let rad = (r.height() * 0.5).min(r.width() * 0.5);
+    let (cd, ci) = (Pos2::new(r.right() - rad, r.center().y), Pos2::new(r.left() + rad, r.center().y));
+    let mut v = Vec::with_capacity(2 * n + 2);
+    for i in 0..=n {
+        let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * i as f32 / n as f32;
+        v.push(cd + Vec2::new(a.cos(), a.sin()) * rad);
+    }
+    for i in 0..=n {
+        let a = std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * i as f32 / n as f32;
+        v.push(ci + Vec2::new(a.cos(), a.sin()) * rad);
+    }
+    v
+}
+
+/// Píldora rellena con un color por punto (abanico desde el centro).
+fn pildora_mesh(p: &egui::Painter, r: Rect, centro: Color32, color: impl Fn(Pos2) -> Color32) {
+    let pts = contorno_pildora(r, 20);
+    let mut m = egui::Mesh::default();
+    m.colored_vertex(r.center(), centro);
+    for q in &pts {
+        m.colored_vertex(*q, color(*q));
+    }
+    let n = pts.len() as u32;
+    for i in 0..n {
+        m.add_triangle(0, 1 + i, 1 + (i + 1) % n);
+    }
+    p.add(egui::Shape::mesh(m));
+}
+
+/// Brillo del metal líquido en un punto: bandas diagonales que se mueven con el tiempo.
+fn brillo_metal(q: Pos2, r: Rect, t: f32) -> Color32 {
+    let u = ((q.x - r.left()) + (q.y - r.top()) * 1.6) / r.width().max(1.0);
+    let b = 0.5 + 0.5 * (u * std::f32::consts::TAU * 1.6 - t * 1.7).sin();
+    let b2 = 0.5 + 0.5 * (u * std::f32::consts::TAU * 3.3 + t * 1.1 + 1.3).sin();
+    let v = (b * 0.7 + b2 * 0.3).powf(1.6);
+    let g = 70.0 + 185.0 * v;
+    // un toque de rojo y azul en los brillos, como el reflejo del metal
+    let rojo = if v > 0.65 { 14.0 * (v - 0.65) / 0.35 } else { 0.0 };
+    let azul = if v < 0.35 { 12.0 * (0.35 - v) / 0.35 } else { 0.0 };
+    Color32::from_rgb((g + rojo).min(255.0) as u8, g as u8, (g + azul).min(255.0) as u8)
+}
+
+/// Botón principal de metal líquido: borde cromado animado, interior negro y onda al hacer clic.
+fn boton_metal(ui: &mut Ui, texto: &str, tam: Vec2) -> Response {
+    let (r, resp) = ui.allocate_exact_size(tam, Sense::click());
+    if !ui.is_rect_visible(r) {
+        return resp;
+    }
+    let ctx = ui.ctx().clone();
+    let ahora = ui.input(|i| i.time);
+    let hover = ctx.animate_bool_with_time(resp.id.with("h"), resp.hovered(), 0.25);
+    // el metal corre más rápido al pasar el ratón y da un empujón al hacer clic
+    let id_clic = resp.id.with("clic");
+    if resp.clicked() {
+        let pos = resp.interact_pointer_pos().unwrap_or(r.center());
+        ctx.data_mut(|d| d.insert_temp(id_clic, (ahora, pos)));
+    }
+    let clic: Option<(f64, Pos2)> = ctx.data(|d| d.get_temp(id_clic));
+    let empuje = clic.map(|(t0, _)| (1.0 - ((ahora - t0) / 0.3) as f32).clamp(0.0, 1.0)).unwrap_or(0.0);
+    let id_fase = resp.id.with("fase");
+    let (fase_ant, t_ant): (f32, f64) = ctx.data(|d| d.get_temp(id_fase)).unwrap_or((0.0, ahora));
+    let vel = 1.0 * hover + 2.4 * empuje;
+    let fase = fase_ant + ((ahora - t_ant) as f32).min(0.1) * vel;
+    ctx.data_mut(|d| d.insert_temp(id_fase, (fase, ahora)));
+    let apretado = resp.is_pointer_button_down_on();
+    let r = if apretado { r.shrink(1.0).translate(Vec2::new(0.0, 1.0)) } else { r };
+    let p = ui.painter();
+    // sombra suave
+    p.rect_filled(r.translate(Vec2::new(0.0, 3.0)).expand(1.0), 99, Color32::from_black_alpha(if apretado { 40 } else { 90 }));
+    // borde de metal y el interior negro con degradado
+    pildora_mesh(p, r, Color32::from_gray(150), |q| brillo_metal(q, r, fase));
+    let dentro = r.shrink(2.5);
+    let (arriba, alto) = (dentro.top(), dentro.height().max(1.0));
+    pildora_mesh(p, dentro, Color32::from_gray(14), |q| lerp_col(Color32::from_gray(34), Color32::from_gray(0), ((q.y - arriba) / alto).clamp(0.0, 1.0)));
+    // onda del clic
+    if let Some((t0, pos)) = clic {
+        let k = ((ahora - t0) / 0.6) as f32;
+        if k < 1.0 {
+            let pc = p.with_clip_rect(dentro);
+            pc.circle_filled(pos, 10.0 + 50.0 * k, Color32::from_white_alpha((70.0 * (1.0 - k)) as u8));
+        }
+    }
+    let tinta = lerp_col(Color32::from_gray(176), Color32::WHITE, hover);
+    p.text(r.center() + Vec2::new(0.0, 0.5), Align2::CENTER_CENTER, texto, FontId::proportional(14.0), tinta);
+    let activo = hover > 0.0 || empuje > 0.0 || apretado || clic.is_some_and(|(t0, _)| ahora - t0 < 0.7);
+    if activo {
+        ctx.request_repaint_after(Duration::from_millis(16));
+    }
+    // en reposo el metal queda quieto: redibujar toda la ventana solo para moverlo gastaría procesador
+    resp
+}
+
+/// Pestaña con el estilo metálico: la elegida en degradado plateado, las otras gris oscuro.
+fn pestana_metal(ui: &mut Ui, sel: bool, texto: &str, ancho_min: f32) -> Response {
+    let galley = ui.painter().layout_no_wrap(texto.to_string(), FontId::proportional(13.5), Color32::WHITE);
+    let tam = Vec2::new((galley.size().x + 28.0).max(ancho_min), 30.0);
+    let (r, resp) = ui.allocate_exact_size(tam, Sense::click());
+    let t = ui.ctx().animate_bool_with_time(resp.id.with("sel"), sel, 0.3);
+    let p = ui.painter();
+    let base = if resp.hovered() { Color32::from_gray(40) } else { Color32::from_gray(30) };
+    p.rect_filled(r, 99, base);
+    if t > 0.01 {
+        // degradado plateado en diagonal (claro arriba a la izquierda, oscuro abajo a la derecha)
+        let w = r.width() + r.height();
+        pildora_mesh(p, r, Color32::from_gray(130).gamma_multiply(t), |q| {
+            let u = (((q.x - r.left()) + (q.y - r.top())) / w).clamp(0.0, 1.0);
+            let g = if u < 0.5 { 180.0 - 120.0 * u } else { 120.0 - 80.0 * (u - 0.5) };
+            Color32::from_gray(g as u8).gamma_multiply(t)
+        });
+    }
+    p.text(r.center(), Align2::CENTER_CENTER, texto, FontId::proportional(13.5), lerp_col(Color32::from_gray(200), Color32::WHITE, t));
+    resp
 }

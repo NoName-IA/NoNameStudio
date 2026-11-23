@@ -216,8 +216,9 @@ impl StudioApp {
                 if paso.zona.is_empty() && i == 0 {
                     ui.vertical_centered(|ui| {
                         if let Some(tx) = &self.logo {
-                            ui.add(egui::Image::new(tx).fit_to_exact_size(Vec2::splat(56.0)));
+                            ui.add(egui::Image::new(tx).fit_to_exact_size(Vec2::splat(64.0)));
                         }
+                        ui.label(RichText::new("NoName Studio").strong().size(15.0).color(Color32::WHITE));
                     });
                 }
                 if i > 0 && i + 1 < n {
@@ -225,7 +226,7 @@ impl StudioApp {
                 }
                 ui.label(RichText::new(paso.titulo).strong().size(18.0).color(Color32::WHITE));
                 ui.add_space(4.0);
-                ui.label(RichText::new(paso.texto).size(13.5).color(Color32::from_rgb(214, 220, 228)));
+                ui.label(RichText::new(paso.texto).size(13.5).color(Color32::from_gray(221)));
                 if paso.accion != Accion::Leer {
                     ui.add_space(8.0);
                     if hecho {

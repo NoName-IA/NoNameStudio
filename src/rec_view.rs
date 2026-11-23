@@ -132,7 +132,7 @@ impl StudioApp {
                     ui.label(RichText::new("Nivel").small().color(DIM));
                     let (r, _) = ui.allocate_exact_size(Vec2::new(180.0, 8.0), Sense::hover());
                     let p = ui.painter();
-                    p.rect_filled(r, 4, Color32::from_rgb(11, 11, 14));
+                    p.rect_filled(r, 4, Color32::from_gray(12));
                     let db = if self.in_meter > 0.0 { 20.0 * self.in_meter.log10() } else { -99.0 };
                     let f = ((db + 48.0) / 48.0).clamp(0.0, 1.0);
                     let col = if self.in_meter > 0.97 { RED } else if db > -9.0 { Color32::from_rgb(220, 200, 70) } else { GREEN };
@@ -143,8 +143,8 @@ impl StudioApp {
                 let on = self.settings.escucharme;
                 let (r, resp) = ui.allocate_exact_size(Vec2::new(200.0, 36.0), Sense::click());
                 let p = ui.painter();
-                let fondo = if on { Color32::WHITE } else if resp.hovered() { Color32::from_rgb(44, 46, 52) } else { PANEL2 };
-                let tinta = if on { Color32::from_rgb(15, 16, 19) } else { Color32::WHITE };
+                let fondo = if on { Color32::WHITE } else if resp.hovered() { Color32::from_gray(47) } else { PANEL2 };
+                let tinta = if on { Color32::from_gray(17) } else { Color32::WHITE };
                 p.rect_filled(r, 18, fondo);
                 // audífonos dibujados
                 let c = Pos2::new(r.left() + 26.0, r.center().y + 1.0);
@@ -190,7 +190,7 @@ impl StudioApp {
             ui.add_space(12.0);
             // ---------------- centro: tarjeta de NN Tune
             let ancho = (ui.available_width() - 70.0).clamp(560.0, 860.0);
-            Frame::new().fill(Color32::from_rgb(24, 26, 31)).stroke(Stroke::new(1.0, LINE)).corner_radius(12).inner_margin(Margin::same(16)).show(ui, |ui| {
+            Frame::new().fill(Color32::from_gray(27)).stroke(Stroke::new(1.0, LINE)).corner_radius(12).inner_margin(Margin::same(16)).show(ui, |ui| {
                 ui.set_width(ancho);
                 ui.vertical(|ui| {
                 let activo = self.settings.tune_vivo;
@@ -201,9 +201,9 @@ impl StudioApp {
                     let resp = ui.interact(r, ui.id().with("nn_tune_sw"), Sense::click());
                     let t = ui.ctx().animate_bool_with_time(resp.id, activo, 0.18);
                     let p = ui.painter();
-                    p.rect_filled(r, 11, lerp_col(Color32::from_rgb(58, 63, 72), Color32::WHITE, t));
+                    p.rect_filled(r, 11, lerp_col(Color32::from_gray(64), Color32::WHITE, t));
                     let cx = r.left() + 11.0 + (r.width() - 22.0) * t;
-                    p.circle_filled(Pos2::new(cx, r.center().y), 7.0, lerp_col(Color32::WHITE, Color32::from_rgb(15, 16, 19), t));
+                    p.circle_filled(Pos2::new(cx, r.center().y), 7.0, lerp_col(Color32::WHITE, Color32::from_gray(17), t));
                     if resp.on_hover_text(if activo { "Apagar el autotune" } else { "Prender el autotune" }).clicked() {
                         self.settings.tune_vivo = !activo;
                     }
@@ -212,8 +212,8 @@ impl StudioApp {
                     let ra = Rect::from_min_size(Pos2::new(fila.right() - 34.0, fila.center().y - 15.0), Vec2::new(34.0, 30.0));
                     let ra_resp = ui.interact(ra, ui.id().with("nn_tune_adv"), Sense::click());
                     let p = ui.painter();
-                    let fondo = if self.settings.tune_avanzado { Color32::WHITE } else if ra_resp.hovered() { Color32::from_rgb(52, 55, 62) } else { Color32::from_rgb(40, 42, 48) };
-                    let tinta = if self.settings.tune_avanzado { Color32::from_rgb(15, 16, 19) } else { Color32::WHITE };
+                    let fondo = if self.settings.tune_avanzado { Color32::WHITE } else if ra_resp.hovered() { Color32::from_gray(56) } else { Color32::from_gray(43) };
+                    let tinta = if self.settings.tune_avanzado { Color32::from_gray(17) } else { Color32::WHITE };
                     p.rect_filled(ra, 15, fondo);
                     for (k, x) in [(-5.0f32, 3.0f32), (0.0, -3.0), (5.0, 2.0)] {
                         let y = ra.center().y + k;
@@ -227,7 +227,7 @@ impl StudioApp {
                     let rd = Rect::from_min_size(Pos2::new(ra.left() - 8.0 - 168.0, fila.center().y - 15.0), Vec2::new(168.0, 30.0));
                     let rd_resp = ui.interact(rd, ui.id().with("nn_tune_det"), Sense::click());
                     let p = ui.painter();
-                    p.rect_filled(rd, 15, if rd_resp.hovered() { Color32::from_rgb(52, 55, 62) } else { Color32::from_rgb(40, 42, 48) });
+                    p.rect_filled(rd, 15, if rd_resp.hovered() { Color32::from_gray(56) } else { Color32::from_gray(43) });
                     p.text(rd.center(), Align2::CENTER_CENTER, "Detectar tonalidad", FontId::proportional(13.5), Color32::WHITE);
                     if rd_resp.on_hover_text("Busca la tonalidad de la canción a partir de sus notas").clicked() {
                         match detect_key(&self.p) {
@@ -265,10 +265,10 @@ impl StudioApp {
                                     let (r, resp) = ui.allocate_exact_size(tam, Sense::click());
                                     let p = ui.painter();
                                     let ts = ui.ctx().animate_bool_with_time(resp.id.with("sel"), sel, 0.2);
-                                    let base = if resp.hovered() { Color32::from_rgb(30, 32, 37) } else { Color32::from_rgb(21, 22, 26) };
+                                    let base = if resp.hovered() { Color32::from_gray(33) } else { Color32::from_gray(23) };
                                     let fondo = lerp_col(base, Color32::WHITE, ts);
-                                    let tinta = atenuar(lerp_col(Color32::from_rgb(160, 166, 176), Color32::from_rgb(15, 16, 19), ts));
-                                    p.rect(r, 5, atenuar(fondo), Stroke::new(1.0, lerp_col(Color32::from_rgb(40, 42, 48), Color32::WHITE, ts)), StrokeKind::Inside);
+                                    let tinta = atenuar(lerp_col(Color32::from_rgb(160, 166, 176), Color32::from_gray(17), ts));
+                                    p.rect(r, 5, atenuar(fondo), Stroke::new(1.0, lerp_col(Color32::from_gray(43), Color32::WHITE, ts)), StrokeKind::Inside);
                                     icono_estilo(p, [0, 1, 2, 3, 4, 5, 4, 2, 1, 3, 5, 5, 2, 4, 3][i.min(14)], Pos2::new(r.center().x, r.top() + 16.0), tinta);
                                     p.text(Pos2::new(r.center().x, r.bottom() - 10.0), Align2::CENTER_CENTER, crate::fx::ESTILOS[i].nombre, FontId::proportional(11.0), tinta);
                                     let ayuda = crate::fx::ESTILOS[i].ayuda;
@@ -304,20 +304,20 @@ impl StudioApp {
                             // las rayitas crecen hacia el final, como en la foto
                             let largo = 4.0 + 14.0 * t;
                             let grosor = 2.0 + 2.2 * t;
-                            let col = if on { lerp_col(Color32::from_rgb(40, 96, 190), Color32::from_rgb(66, 150, 255), t) } else { Color32::from_rgb(38, 40, 46) };
+                            let col = if on { lerp_col(Color32::from_gray(95), Color32::from_gray(245), t) } else { Color32::from_gray(41) };
                             p.line_segment([c + dir * 66.0, c + dir * (66.0 + largo)], Stroke::new(grosor, atenuar(col)));
                         }
                         // cuerpo de la perilla con un degradado suave
                         for k in 0..12 {
                             let t = k as f32 / 11.0;
-                            p.circle_filled(c - Vec2::new(0.0, t * 6.0), 60.0 - t * 8.0, lerp_col(Color32::from_rgb(15, 16, 19), Color32::from_rgb(30, 32, 37), t));
+                            p.circle_filled(c - Vec2::new(0.0, t * 6.0), 60.0 - t * 8.0, lerp_col(Color32::from_gray(17), Color32::from_gray(33), t));
                         }
-                        p.circle_stroke(c, 60.0, Stroke::new(1.0, Color32::from_rgb(44, 46, 53)));
+                        p.circle_stroke(c, 60.0, Stroke::new(1.0, Color32::from_gray(48)));
                         let a = a0 + span * v;
                         let dir = Vec2::new(a.cos(), a.sin());
                         p.line_segment([c + dir * 34.0, c + dir * 50.0], Stroke::new(3.0, atenuar(Color32::WHITE)));
                         let et = if crate::fx::ESTILOS[(self.settings.tune_estilo as usize).min(crate::fx::ESTILOS.len() - 1)].vel == (0.0, 0.0) { "Robot (siempre al máximo)" } else if v < 0.25 { "Suave" } else if v < 0.55 { "Medio" } else if v < 0.85 { "Intenso" } else { "Lo más intenso" };
-                        p.text(Pos2::new(c.x, r.bottom() - 12.0), Align2::CENTER_CENTER, et, FontId::proportional(14.0), atenuar(Color32::from_rgb(214, 220, 228)));
+                        p.text(Pos2::new(c.x, r.bottom() - 12.0), Align2::CENTER_CENTER, et, FontId::proportional(14.0), atenuar(Color32::from_gray(221)));
                         resp.on_hover_text("Arrastra para cambiar la intensidad (qué tan rápido pasa de una nota a otra) · doble clic: medio");
                     });
                     // escala y teclado
@@ -359,13 +359,13 @@ impl StudioApp {
                             if a_cant > 0.01 {
                                 p.rect_stroke(r.expand(2.0), 7, Stroke::new(2.0, Color32::WHITE.gamma_multiply(a_cant)), StrokeKind::Outside);
                             }
-                            let mut fondo = Color32::from_rgb(17, 18, 21);
-                            fondo = lerp_col(fondo, lerp_col(Color32::from_rgb(17, 18, 21), ACCENT, 0.6), a_ac);
+                            let mut fondo = Color32::from_gray(19);
+                            fondo = lerp_col(fondo, lerp_col(Color32::from_gray(19), ACCENT, 0.6), a_ac);
                             fondo = lerp_col(fondo, Color32::WHITE, a_ton);
                             fondo = lerp_col(fondo, GREEN, a_obj);
-                            let borde = lerp_col(Color32::from_rgb(36, 38, 44), Color32::WHITE, a_en.max(a_ton));
+                            let borde = lerp_col(Color32::from_gray(39), Color32::WHITE, a_en.max(a_ton));
                             p.rect(r, 4, atenuar(fondo), Stroke::new(1.2, atenuar(borde)), StrokeKind::Inside);
-                            let letra = atenuar(lerp_col(lerp_col(Color32::from_rgb(120, 126, 136), Color32::WHITE, a_en), Color32::from_rgb(15, 16, 19), a_ton.max(a_obj)));
+                            let letra = atenuar(lerp_col(lerp_col(Color32::from_rgb(120, 126, 136), Color32::WHITE, a_en), Color32::from_gray(17), a_ton.max(a_obj)));
                             let lineas: Vec<&str> = txt.split('\n').collect();
                             if lineas.len() == 2 {
                                 p.text(r.center() - Vec2::new(0.0, 6.0), Align2::CENTER_CENTER, lineas[0], FontId::proportional(10.0), letra);
@@ -453,10 +453,10 @@ impl StudioApp {
                 let cx = r.center().x;
                 for k in 0..=10 {
                     let y = y0 + (y1 - y0) * k as f32 / 10.0;
-                    p.line_segment([Pos2::new(cx - 20.0, y), Pos2::new(cx - 9.0, y)], Stroke::new(1.0, Color32::from_rgb(52, 55, 62)));
-                    p.line_segment([Pos2::new(cx + 9.0, y), Pos2::new(cx + 20.0, y)], Stroke::new(1.0, Color32::from_rgb(52, 55, 62)));
+                    p.line_segment([Pos2::new(cx - 20.0, y), Pos2::new(cx - 9.0, y)], Stroke::new(1.0, Color32::from_gray(56)));
+                    p.line_segment([Pos2::new(cx + 9.0, y), Pos2::new(cx + 20.0, y)], Stroke::new(1.0, Color32::from_gray(56)));
                 }
-                p.line_segment([Pos2::new(cx, y0), Pos2::new(cx, y1)], Stroke::new(2.0, Color32::from_rgb(44, 46, 53)));
+                p.line_segment([Pos2::new(cx, y0), Pos2::new(cx, y1)], Stroke::new(2.0, Color32::from_gray(48)));
                 let yv = y1 - (self.settings.vol_escucha / maxv) * (y1 - y0);
                 p.line_segment([Pos2::new(cx, yv), Pos2::new(cx, y1)], Stroke::new(2.5, ACCENT));
                 p.circle_filled(Pos2::new(cx, yv), 7.0, Color32::WHITE);
@@ -503,7 +503,7 @@ impl StudioApp {
                     // afinador: -50 … +50 cents
                     let (r, _) = ui.allocate_exact_size(Vec2::new(190.0, 10.0), Sense::hover());
                     let p = ui.painter();
-                    p.rect_filled(r, 5, Color32::from_rgb(14, 15, 18));
+                    p.rect_filled(r, 5, Color32::from_gray(16));
                     p.rect_filled(Rect::from_center_size(r.center(), Vec2::new(r.width() * 0.24, r.height())), 5, GREEN.gamma_multiply(0.25));
                     let x = r.center().x + (cents / 50.0).clamp(-1.0, 1.0) * r.width() * 0.5;
                     p.circle_filled(Pos2::new(x, r.center().y), 5.0, if cents.abs() < 12.0 { GREEN } else { Color32::WHITE });
@@ -512,10 +512,10 @@ impl StudioApp {
                     ui.label(RichText::new("Canta para ver la nota").small().color(DIM));
                 }
             });
-            // gráfico de los últimos segundos: voz (blanco) y corrección (azul)
+            // gráfico de los últimos segundos: voz (blanco) y corrección (verde)
             let (r, _) = ui.allocate_exact_size(Vec2::new((ui.available_width() - 210.0).max(160.0), 64.0), Sense::hover());
             let p = ui.painter();
-            p.rect_filled(r, 8, Color32::from_rgb(14, 15, 18));
+            p.rect_filled(r, 8, Color32::from_gray(16));
             let vals: Vec<f32> = self.trazo.iter().flat_map(|t| [t.0, t.1]).filter(|v| *v > 0.0).collect();
             if !vals.is_empty() {
                 let lo = vals.iter().fold(f32::MAX, |m, v| m.min(*v)).floor() - 2.0;
@@ -524,7 +524,7 @@ impl StudioApp {
                 let n = self.trazo.len().max(2);
                 let x = |i: usize| r.left() + i as f32 / (n - 1) as f32 * r.width();
                 for k in [1usize, 0] {
-                    let col = if k == 0 { Color32::WHITE } else { ACCENT };
+                    let col = if k == 0 { Color32::WHITE } else { GREEN };
                     let mut tramo: Vec<Pos2> = vec![];
                     for (i, t) in self.trazo.iter().enumerate() {
                         let v = if k == 0 { t.0 } else { t.1 };
@@ -541,7 +541,7 @@ impl StudioApp {
                     }
                 }
             } else {
-                p.text(r.center(), Align2::CENTER_CENTER, "Aquí se dibuja tu voz (blanco) y la nota corregida (azul)", FontId::proportional(11.0), DIM);
+                p.text(r.center(), Align2::CENTER_CENTER, "Aquí se dibuja tu voz (blanco) y la nota corregida (verde)", FontId::proportional(11.0), DIM);
             }
             // acordes
             ui.vertical(|ui| {
@@ -600,7 +600,7 @@ impl StudioApp {
             return;
         }
         let t = ui.input(|i| i.time) as f32;
-        Frame::new().fill(Color32::from_rgb(16, 18, 61)).stroke(Stroke::new(1.0, RED)).corner_radius(5).inner_margin(Margin::symmetric(6, 3)).show(ui, |ui| {
+        Frame::new().fill(Color32::from_gray(24)).stroke(Stroke::new(1.0, RED)).corner_radius(5).inner_margin(Margin::symmetric(6, 3)).show(ui, |ui| {
             ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
                 let a = 0.5 + 0.5 * (t * 5.0).sin();
@@ -610,7 +610,7 @@ impl StudioApp {
                 // nivel de entrada del micrófono
                 let (r, _) = ui.allocate_exact_size(Vec2::new(46.0, 10.0), Sense::hover());
                 let p = ui.painter();
-                p.rect_filled(r, 2, Color32::from_rgb(10, 10, 12));
+                p.rect_filled(r, 2, Color32::from_gray(11));
                 let db = if self.in_meter > 0.0 { 20.0 * self.in_meter.log10() } else { -99.0 };
                 let f = ((db + 48.0) / 48.0).clamp(0.0, 1.0);
                 let col = if self.in_meter > 0.97 { RED } else if db > -9.0 { Color32::from_rgb(220, 200, 70) } else { GREEN };
@@ -705,14 +705,14 @@ fn perilla(ui: &mut Ui, v: &mut f32, lo: f32, hi: f32, def: f32, nombre: &str, a
         p.circle_filled(c, 13.0, Color32::WHITE);
         let a = a0 + span * t;
         let dir = Vec2::new(a.cos(), a.sin());
-        p.line_segment([c + dir * 4.0, c + dir * 11.0], Stroke::new(2.2, Color32::from_rgb(15, 16, 19)));
+        p.line_segment([c + dir * 4.0, c + dir * 11.0], Stroke::new(2.2, Color32::from_gray(17)));
         if lo < 0.0 {
             p.text(Pos2::new(c.x - 19.0, c.y + 10.0), Align2::CENTER_CENTER, "I", FontId::proportional(9.0), DIM);
             p.text(Pos2::new(c.x + 19.0, c.y + 10.0), Align2::CENTER_CENTER, "D", FontId::proportional(9.0), DIM);
         }
         resp.on_hover_text(ayuda);
         ui.vertical_centered(|ui| {
-            ui.label(RichText::new(nombre).size(11.5).color(Color32::from_rgb(200, 206, 214)));
+            ui.label(RichText::new(nombre).size(11.5).color(Color32::from_gray(207)));
         });
     });
 }

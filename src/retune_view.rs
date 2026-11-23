@@ -254,9 +254,9 @@ impl StudioApp {
             // botón redondo: reproducir / detener
             let (r, resp) = ui.allocate_exact_size(Vec2::new(36.0, 36.0), Sense::click());
             let p = ui.painter();
-            p.circle_filled(r.center(), 17.0, if resp.hovered() { Color32::from_rgb(225, 230, 238) } else { Color32::WHITE });
+            p.circle_filled(r.center(), 17.0, if resp.hovered() { Color32::from_gray(231) } else { Color32::WHITE });
             let c = r.center();
-            let oscuro = Color32::from_rgb(15, 16, 19);
+            let oscuro = Color32::from_gray(17);
             if sonando {
                 p.rect_filled(Rect::from_center_size(c, Vec2::new(11.0, 11.0)), 2, oscuro);
             } else {
@@ -302,7 +302,7 @@ impl StudioApp {
             let r = ui.add(egui::Slider::new(&mut aplanar, 0.0..=1.0).custom_formatter(|v, _| format!("{:.0} %", v * 100.0))).on_hover_text("Aplana el tono dentro de cada nota (100 % = nota totalmente recta)");
             soltar_aplanar = r.drag_stopped() || (r.changed() && !r.dragged());
             ui.add_space(16.0);
-            if ui.add(egui::Button::new(RichText::new("Aplicar (crea una toma nueva)").strong()).fill(ACCENT)).clicked() {
+            if boton_metal(ui, "Aplicar (toma nueva)", Vec2::new(180.0, 34.0)).clicked() {
                 accion = Some(7);
             }
         });
@@ -380,12 +380,12 @@ impl StudioApp {
             // nombres de las notas a la izquierda
             let (rl, _) = ui.allocate_exact_size(Vec2::new(44.0, alto), Sense::hover());
             let p = ui.painter();
-            p.rect_filled(rl, 0, Color32::from_rgb(18, 19, 23));
+            p.rect_filled(rl, 0, Color32::from_gray(20));
             for m in (lo as i32)..(hi as i32) {
                 let y0 = rl.top() + (hi - m as f32 - 1.0) * fila;
                 let negra = [1, 3, 6, 8, 10].contains(&m.rem_euclid(12));
                 if negra {
-                    p.rect_filled(Rect::from_min_size(Pos2::new(rl.left(), y0), Vec2::new(44.0, fila)), 0, Color32::from_rgb(12, 13, 16));
+                    p.rect_filled(Rect::from_min_size(Pos2::new(rl.left(), y0), Vec2::new(44.0, fila)), 0, Color32::from_gray(14));
                 }
                 if fila >= 11.0 || m.rem_euclid(12) == 0 {
                     p.text(Pos2::new(rl.right() - 5.0, y0 + fila * 0.5), Align2::RIGHT_CENTER, nombre_nota(m as f32), FontId::proportional(10.0), if m.rem_euclid(12) == 0 { Color32::WHITE } else { DIM });
@@ -395,7 +395,7 @@ impl StudioApp {
                 let w = (n_h as f32 * z).max(ancho_vista);
                 let (r, resp) = ui.allocate_exact_size(Vec2::new(w, alto), Sense::click_and_drag());
                 let p = ui.painter_at(r);
-                p.rect_filled(r, 0, Color32::from_rgb(20, 21, 25));
+                p.rect_filled(r, 0, Color32::from_gray(22));
                 let y_de = |m: f32| r.top() + (hi - m) * fila;
                 // filas: negras más oscuras, notas de la escala marcadas
                 for m in (lo as i32)..(hi as i32) {
@@ -403,12 +403,12 @@ impl StudioApp {
                     let fr = Rect::from_min_size(Pos2::new(r.left(), y0), Vec2::new(w, fila));
                     let en = (mascara >> m.rem_euclid(12)) & 1 == 1;
                     if [1, 3, 6, 8, 10].contains(&m.rem_euclid(12)) {
-                        p.rect_filled(fr, 0, Color32::from_rgb(16, 17, 20));
+                        p.rect_filled(fr, 0, Color32::from_gray(18));
                     }
                     if en {
                         p.rect_filled(fr, 0, Color32::from_rgba_unmultiplied(61, 139, 255, 10));
                     }
-                    p.hline(r.x_range(), y0, Stroke::new(1.0, Color32::from_rgb(28, 30, 35)));
+                    p.hline(r.x_range(), y0, Stroke::new(1.0, Color32::from_gray(31)));
                 }
                 // segundos
                 let x_de = |h: f32| r.left() + h * z;
@@ -417,7 +417,7 @@ impl StudioApp {
                 let mut s = 0.0;
                 while s < segs {
                     let x = x_de((s * rt.sr - RT_CENTRO as f32).max(0.0) / RT_HOP as f32);
-                    p.vline(x, r.y_range(), Stroke::new(1.0, Color32::from_rgb(32, 34, 40)));
+                    p.vline(x, r.y_range(), Stroke::new(1.0, Color32::from_gray(35)));
                     p.text(Pos2::new(x + 3.0, r.top() + 2.0), Align2::LEFT_TOP, format!("{s:.0} s"), FontId::proportional(10.0), DIM);
                     s += paso_s;
                 }
@@ -428,7 +428,7 @@ impl StudioApp {
                         continue;
                     }
                     let a = pk.min(1.0) * 36.0;
-                    p.vline(x, (r.bottom() - 2.0 - a)..=(r.bottom() - 2.0), Stroke::new(z.max(1.0), Color32::from_rgb(40, 44, 54)));
+                    p.vline(x, (r.bottom() - 2.0 - a)..=(r.bottom() - 2.0), Stroke::new(z.max(1.0), Color32::from_gray(46)));
                 }
                 // tono de la voz fuera de las notas (gris)
                 let mut tramo: Vec<Pos2> = vec![];

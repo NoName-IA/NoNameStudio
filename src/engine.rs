@@ -262,6 +262,8 @@ pub struct Engine {
     mon_env: f32,
     mon_agc: f32,
     mon_verb: crate::fx::Verb,
+    /// llamadas seguidas en silencio total estando detenido (con muchas, el motor descansa)
+    reposo: u32,
 }
 
 impl Engine {
@@ -328,6 +330,7 @@ impl Engine {
             mon_env: 0.0,
             mon_agc: 1.0,
             mon_verb: crate::fx::Verb::new(sr),
+            reposo: 0,
         };
         e.sync_strips();
         e
@@ -1006,6 +1009,23 @@ impl Engine {
         let t0 = if self.offline { None } else { Some(std::time::Instant::now()) };
         let total = out.len() / 2;
         self.mon_cb = total.max(BLOCK);
+        // detenido y sin nada que suene (ni colas de reverb): el motor descansa y entrega silencio
+        let quieto = !self.offline
+            && !self.playing
+            && self.voices.is_empty()
+            && self.prev_voice.is_none()
+            && self.clicks.is_empty()
+            && self.insts.is_empty()
+            && self.inserts.values().all(|v| v.is_empty())
+            && self.proj.master_inserts.is_empty()
+            && !self.status.monitor.on.load(Ordering::Relaxed);
+        if !quieto {
+            self.reposo = 0;
+        } else if self.reposo > 40 {
+            out.fill(0.0);
+            self.status.load.store(0f32.to_bits(), Ordering::Relaxed);
+            return;
+        }
         let mut done = 0;
         while done < total {
             let n = (total - done).min(BLOCK);
@@ -1014,6 +1034,10 @@ impl Engine {
         }
         if self.offline {
             return;
+        }
+        if quieto {
+            let pico = out.iter().fold(0f32, |m, v| m.max(v.abs()));
+            self.reposo = if pico < 1e-5 { self.reposo + 1 } else { 0 };
         }
         // estado para la interfaz
         let st = &self.status;

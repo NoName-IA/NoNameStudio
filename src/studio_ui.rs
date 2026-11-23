@@ -838,12 +838,12 @@ impl StudioApp {
                 let carril = Rect::from_min_size(Pos2::new(org.x, y0), Vec2::new(rect.right() - org.x, TH));
                 hp.rect_filled(carril, 0, Color32::from_black_alpha(90));
             }
-            hp.rect_filled(hr, 0, if fondo.hovered() { Color32::from_rgb(29, 31, 36) } else { Color32::from_rgb(23, 25, 29) });
-            hp.hline(hr.x_range(), hr.bottom() - 0.5, Stroke::new(1.0, Color32::from_rgb(13, 14, 17)));
-            hp.vline(hr.right() - 0.5, hr.y_range(), Stroke::new(1.0, Color32::from_rgb(13, 14, 17)));
+            hp.rect_filled(hr, 0, if fondo.hovered() { Color32::from_gray(32) } else { Color32::from_gray(26) });
+            hp.hline(hr.x_range(), hr.bottom() - 0.5, Stroke::new(1.0, Color32::from_gray(15)));
+            hp.vline(hr.right() - 0.5, hr.y_range(), Stroke::new(1.0, Color32::from_gray(15)));
             // color de la pista: el de su primer clip
             let tiene_audio = self.p.audio_clips.iter().any(|c| c.track as usize == t);
-            let col = self.p.playlist.iter().find(|c| c.track as usize == t).and_then(|c| self.p.pattern(c.pat)).map(|p| c32(p.color)).unwrap_or(if tiene_audio { ACCENT } else { Color32::from_rgb(70, 74, 84) });
+            let col = self.p.playlist.iter().find(|c| c.track as usize == t).and_then(|c| self.p.pattern(c.pat)).map(|p| c32(p.color)).unwrap_or(if tiene_audio { ACCENT } else { Color32::from_gray(76) });
             hp.rect_filled(Rect::from_min_size(hr.min, Vec2::new(3.0, TH)), 0, if suena { col } else { col.gamma_multiply(0.4) });
             // ícono: micrófono (audio) o nota (patrones)
             let ic = Pos2::new(hr.left() + 17.0, y0 + 19.0);
@@ -868,9 +868,9 @@ impl StudioApp {
                 let r = Rect::from_min_size(Pos2::new(hr.right() - 60.0 + k as f32 * 27.0, y0 + 9.0), Vec2::new(23.0, 20.0));
                 let on = if k == 0 { pista.mute } else { pista.solo };
                 let rr = ui.interact(r, ui.id().with(("pista_ms", t, k)), Sense::click());
-                let base = if rr.hovered() { Color32::from_rgb(56, 59, 67) } else { Color32::from_rgb(40, 42, 48) };
+                let base = if rr.hovered() { Color32::from_gray(61) } else { Color32::from_gray(43) };
                 hp.rect_filled(r, 5, if on { if k == 0 { ambar } else { ACCENT } } else { base });
-                hp.text(r.center(), Align2::CENTER_CENTER, if k == 0 { "M" } else { "S" }, FontId::proportional(11.5), if on { Color32::from_rgb(15, 16, 19) } else { Color32::WHITE });
+                hp.text(r.center(), Align2::CENTER_CENTER, if k == 0 { "M" } else { "S" }, FontId::proportional(11.5), if on { Color32::from_gray(17) } else { Color32::WHITE });
                 if rr.on_hover_text(if k == 0 { "Silenciar la pista" } else { "Solo: escuchar solo esta pista" }).clicked() {
                     self.snap();
                     let p = self.p.pista_mut(t);
@@ -902,7 +902,7 @@ impl StudioApp {
             let vol = self.p.pista(t).vol;
             let cy = vr.center().y;
             let xk = vr.left() + vol / maxv * vr.width();
-            hp.line_segment([Pos2::new(vr.left(), cy), Pos2::new(vr.right(), cy)], Stroke::new(3.0, Color32::from_rgb(48, 51, 58)));
+            hp.line_segment([Pos2::new(vr.left(), cy), Pos2::new(vr.right(), cy)], Stroke::new(3.0, Color32::from_gray(52)));
             hp.line_segment([Pos2::new(vr.left(), cy), Pos2::new(xk, cy)], Stroke::new(3.0, if suena { ACCENT } else { DIM }));
             hp.circle_filled(Pos2::new(xk, cy), if vresp.hovered() || vresp.dragged() { 7.0 } else { 6.0 }, Color32::WHITE);
             let db = if vol > 0.0001 { format!("{:+.1} dB", 20.0 * vol.log10()) } else { "-∞".into() };
@@ -925,9 +925,9 @@ impl StudioApp {
                 cambio = true;
             }
             let pan = self.p.pista(t).pan;
-            hp.circle_filled(pc, 10.0, if suena { Color32::WHITE } else { Color32::from_rgb(150, 154, 162) });
+            hp.circle_filled(pc, 10.0, if suena { Color32::WHITE } else { Color32::from_gray(155) });
             let a = -std::f32::consts::FRAC_PI_2 + pan * std::f32::consts::PI * 0.75;
-            hp.line_segment([pc + Vec2::new(a.cos(), a.sin()) * 2.5, pc + Vec2::new(a.cos(), a.sin()) * 8.5], Stroke::new(2.0, Color32::from_rgb(15, 16, 19)));
+            hp.line_segment([pc + Vec2::new(a.cos(), a.sin()) * 2.5, pc + Vec2::new(a.cos(), a.sin()) * 8.5], Stroke::new(2.0, Color32::from_gray(17)));
             hp.text(pc + Vec2::new(-15.0, 9.0), Align2::CENTER_CENTER, "L", FontId::proportional(8.5), DIM);
             hp.text(pc + Vec2::new(15.0, 9.0), Align2::CENTER_CENTER, "R", FontId::proportional(8.5), DIM);
             let pt = if pan.abs() < 0.01 { "al centro".to_string() } else if pan < 0.0 { format!("{:.0} % izquierda", -pan * 100.0) } else { format!("{:.0} % derecha", pan * 100.0) };
@@ -935,11 +935,11 @@ impl StudioApp {
         }
         // esquina de arriba: «+ Añadir pista»
         let esq = Rect::from_min_size(Pos2::new(hx, rect.top()), Vec2::new(tn, rul));
-        hp.rect_filled(esq, 0, Color32::from_rgb(17, 18, 21));
-        hp.vline(esq.right() - 0.5, esq.y_range(), Stroke::new(1.0, Color32::from_rgb(13, 14, 17)));
+        hp.rect_filled(esq, 0, Color32::from_gray(19));
+        hp.vline(esq.right() - 0.5, esq.y_range(), Stroke::new(1.0, Color32::from_gray(15)));
         let br = Rect::from_min_size(Pos2::new(esq.left() + 8.0, esq.top() + 3.0), Vec2::new(122.0, rul - 6.0));
         let bresp = ui.interact(br, ui.id().with("pista_nueva"), Sense::click());
-        hp.rect_filled(br, 11, if bresp.hovered() { Color32::from_rgb(52, 55, 62) } else { Color32::from_rgb(38, 40, 46) });
+        hp.rect_filled(br, 11, if bresp.hovered() { Color32::from_gray(56) } else { Color32::from_gray(41) });
         hp.text(br.center(), Align2::CENTER_CENTER, "+  Añadir pista", FontId::proportional(12.0), Color32::WHITE);
         if bresp.clicked() {
             self.snap();
@@ -969,11 +969,11 @@ impl StudioApp {
         let spx = bw / STEPS_PER_BAR as f32;
         for t in 0..ntr {
             let r = Rect::from_min_size(Pos2::new(org.x, org.y + t as f32 * TH), Vec2::new(bars as f32 * bw, TH));
-            painter.rect_filled(r, 0, if t % 2 == 0 { Color32::from_rgb(29, 30, 34) } else { Color32::from_rgb(25, 26, 30) });
-            painter.hline(rect.left()..=rect.right(), r.bottom() - 0.5, Stroke::new(1.0, Color32::from_rgb(19, 19, 22)));
+            painter.rect_filled(r, 0, if t % 2 == 0 { Color32::from_gray(31) } else { Color32::from_gray(27) });
+            painter.hline(rect.left()..=rect.right(), r.bottom() - 0.5, Stroke::new(1.0, Color32::from_gray(20)));
         }
-        painter.rect_filled(Rect::from_min_size(rect.min, Vec2::new(rect.width(), rul)), 0, Color32::from_rgb(17, 18, 21));
-        painter.hline(rect.x_range(), rect.top() + rul - 0.5, Stroke::new(1.0, Color32::from_rgb(40, 43, 50)));
+        painter.rect_filled(Rect::from_min_size(rect.min, Vec2::new(rect.width(), rul)), 0, Color32::from_gray(19));
+        painter.hline(rect.x_range(), rect.top() + rul - 0.5, Stroke::new(1.0, Color32::from_gray(44)));
         // región de bucle / punch
         if self.p.loop_b > self.p.loop_a {
             let x0 = org.x + self.p.loop_a as f32 * bw;
@@ -987,10 +987,10 @@ impl StudioApp {
         }
         for b in 0..=bars {
             let x = org.x + b as f32 * bw;
-            painter.vline(x, org.y..=rect.bottom(), Stroke::new(1.0, if b % 4 == 0 { Color32::from_rgb(15, 16, 19) } else { Color32::from_rgb(21, 22, 26) }));
+            painter.vline(x, org.y..=rect.bottom(), Stroke::new(1.0, if b % 4 == 0 { Color32::from_gray(17) } else { Color32::from_gray(23) }));
             if b < bars {
-                painter.vline(x, (rect.top() + rul - 9.0)..=(rect.top() + rul), Stroke::new(1.0, Color32::from_rgb(70, 74, 84)));
-                painter.text(Pos2::new(x + 4.0, rect.top() + 13.0), Align2::LEFT_CENTER, format!("{}", b + 1), FontId::proportional(12.0), if b < song { Color32::WHITE } else { Color32::from_rgb(60, 62, 71) });
+                painter.vline(x, (rect.top() + rul - 9.0)..=(rect.top() + rul), Stroke::new(1.0, Color32::from_gray(76)));
+                painter.text(Pos2::new(x + 4.0, rect.top() + 13.0), Align2::LEFT_CENTER, format!("{}", b + 1), FontId::proportional(12.0), if b < song { Color32::WHITE } else { Color32::from_gray(64) });
             }
         }
         let pf = org.x + self.play_from as f32 * spx;
@@ -1074,7 +1074,7 @@ impl StudioApp {
             let track = tr.track;
             let w = if tr.looped { tr.region.map(|r| (r.1 - r.0) as f32).unwrap_or(16.0) } else { (now as f32 - s0).max(0.5) };
             let r = Rect::from_min_size(Pos2::new(org.x + s0 * spx, org.y + track as f32 * TH + 2.0), Vec2::new(w * spx, TH - 4.0));
-            painter.rect(r, 4, Color32::from_rgb(20, 22, 78), Stroke::new(1.5, RED), StrokeKind::Inside);
+            painter.rect(r, 4, Color32::from_gray(28), Stroke::new(1.5, RED), StrokeKind::Inside);
             // forma de onda en vivo: en bucle se ve la vuelta actual
             let px_s = spx / self.p.step_secs() as f32;
             let grabado = self.rec_secs();
@@ -1092,7 +1092,7 @@ impl StudioApp {
         // automatización
         for a in &self.p.autos {
             let r = step_rect(a.track, a.start, a.len);
-            painter.rect(r, 4, Color32::from_rgb(38, 39, 45), Stroke::new(1.0, Color32::from_rgb(130, 110, 190)), StrokeKind::Inside);
+            painter.rect(r, 4, Color32::from_gray(41), Stroke::new(1.0, Color32::from_rgb(130, 110, 190)), StrokeKind::Inside);
             let inner = r.shrink2(Vec2::new(2.0, 4.0));
             let mut pts = vec![];
             let n = (inner.width() / 3.0).max(2.0) as usize;
@@ -1732,16 +1732,16 @@ impl StudioApp {
         });
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(560.0, 200.0), Sense::click_and_drag());
         let p = ui.painter_at(rect);
-        p.rect_filled(rect, 4, Color32::from_rgb(17, 18, 21));
+        p.rect_filled(rect, 4, Color32::from_gray(19));
         let bars = (a.len as f32 / 16.0).max(0.25);
         let mut b = 0.0;
         while b <= bars {
             let x = rect.left() + b / bars * rect.width();
-            p.vline(x, rect.y_range(), Stroke::new(1.0, Color32::from_rgb(31, 32, 37)));
+            p.vline(x, rect.y_range(), Stroke::new(1.0, Color32::from_gray(33)));
             b += if bars > 16.0 { 4.0 } else { 1.0 };
         }
         for k in 1..4 {
-            p.hline(rect.x_range(), rect.top() + rect.height() * k as f32 / 4.0, Stroke::new(1.0, Color32::from_rgb(28, 29, 33)));
+            p.hline(rect.x_range(), rect.top() + rect.height() * k as f32 / 4.0, Stroke::new(1.0, Color32::from_gray(30)));
         }
         let to = |pt: [f32; 2]| Pos2::new(rect.left() + pt[0] * rect.width(), rect.bottom() - pt[1] * rect.height());
         let mut line = vec![to([0.0, a.at(0.0)])];
@@ -1910,7 +1910,7 @@ impl StudioApp {
         // forma de onda con inicio/fin y cortes
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(560.0, 130.0), Sense::click_and_drag());
         let p = ui.painter_at(rect);
-        p.rect_filled(rect, 4, Color32::from_rgb(16, 16, 19));
+        p.rect_filled(rect, 4, Color32::from_gray(17));
         if let Some((pk, _)) = self.wave_peaks.get(&sp.file) {
             let n = pk.len();
             for x in 0..rect.width() as usize {
@@ -1918,7 +1918,7 @@ impl StudioApp {
                 let v = pk[i.min(n - 1)] * sp.gain.min(2.0);
                 let cx = rect.left() + x as f32;
                 let inside = (x as f32 / rect.width()) >= sp.start && (x as f32 / rect.width()) <= sp.end;
-                let col = if inside { Color32::from_rgb(242, 170, 90) } else { Color32::from_rgb(54, 56, 64) };
+                let col = if inside { Color32::from_rgb(242, 170, 90) } else { Color32::from_gray(58) };
                 p.vline(cx, (rect.center().y - v * 60.0)..=(rect.center().y + v * 60.0), Stroke::new(1.0, col));
             }
         } else {
@@ -1928,8 +1928,8 @@ impl StudioApp {
         if sp.slice && secs > 0.0 {
             for (i, s) in sp.slices.iter().enumerate() {
                 let x = xs(s / secs);
-                p.vline(x, rect.y_range(), Stroke::new(1.5, Color32::from_rgb(120, 210, 255)));
-                p.text(Pos2::new(x + 3.0, rect.top() + 2.0), Align2::LEFT_TOP, format!("{}", i + 1), FontId::proportional(10.0), Color32::from_rgb(120, 210, 255));
+                p.vline(x, rect.y_range(), Stroke::new(1.5, Color32::from_gray(225)));
+                p.text(Pos2::new(x + 3.0, rect.top() + 2.0), Align2::LEFT_TOP, format!("{}", i + 1), FontId::proportional(10.0), Color32::from_gray(225));
             }
         } else {
             for f in [sp.start, sp.end] {
@@ -2628,9 +2628,9 @@ impl StudioApp {
         // barra de sonoridad
         let (r, _) = ui.allocate_exact_size(Vec2::new(360.0, 16.0), Sense::hover());
         let p = ui.painter();
-        p.rect_filled(r, 3, Color32::from_rgb(11, 11, 14));
+        p.rect_filled(r, 3, Color32::from_gray(12));
         let fx = |db: f32| r.left() + ((db + 36.0) / 36.0).clamp(0.0, 1.0) * r.width();
-        p.rect_filled(Rect::from_min_max(r.min, Pos2::new(fx(l[1]), r.bottom())), 3, if l[1] > -9.0 { RED } else if l[1] > -16.0 { GREEN } else { Color32::from_rgb(90, 155, 224) });
+        p.rect_filled(Rect::from_min_max(r.min, Pos2::new(fx(l[1]), r.bottom())), 3, if l[1] > -9.0 { RED } else if l[1] > -16.0 { GREEN } else { Color32::from_gray(150) });
         let tgt = MASTER_TARGETS[self.master_target].1;
         p.vline(fx(tgt), r.y_range(), Stroke::new(2.0, Color32::WHITE));
         ui.label(RichText::new("Reproduce la canción en SONG para medir. La línea blanca es el objetivo.").small().color(DIM));
@@ -2643,9 +2643,9 @@ impl StudioApp {
                 let (r, resp) = ui.allocate_exact_size(Vec2::new(86.0, 40.0), Sense::click());
                 let t = ui.ctx().animate_bool_with_time(resp.id, sel, 0.18);
                 let p = ui.painter();
-                let base = if resp.hovered() { Color32::from_rgb(36, 38, 44) } else { Color32::from_rgb(26, 28, 33) };
+                let base = if resp.hovered() { Color32::from_gray(39) } else { Color32::from_gray(29) };
                 p.rect(r, 8, lerp_col(base, Color32::WHITE, t), Stroke::new(1.0, lerp_col(LINE, Color32::WHITE, t)), StrokeKind::Inside);
-                p.text(r.center(), Align2::CENTER_CENTER, *n, FontId::proportional(13.0), lerp_col(Color32::WHITE, Color32::from_rgb(15, 16, 19), t));
+                p.text(r.center(), Align2::CENTER_CENTER, *n, FontId::proportional(13.0), lerp_col(Color32::WHITE, Color32::from_gray(17), t));
                 if resp.on_hover_text(*d).clicked() {
                     self.master_estilo = i;
                 }
@@ -2695,7 +2695,12 @@ impl StudioApp {
             }
         });
         let busy = self.master_job.is_some();
-        if ui.add_enabled(!busy, egui::Button::new(if busy { "Analizando la canción…" } else { "Masterizar canción" }).min_size(Vec2::new(220.0, 30.0))).clicked() {
+        if busy {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Analizando la canción…");
+            });
+        } else if boton_metal(ui, "Masterizar canción", Vec2::new(220.0, 36.0)).clicked() {
             self.start_mastering();
         }
         ui.label(RichText::new("Ajusta NN EQ, NN Dynamics y el limitador del master sin distorsión. Se puede deshacer.").small().color(DIM));
