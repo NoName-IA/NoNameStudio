@@ -9,7 +9,7 @@ fn main() {
         let proj = args
             .get(3)
             .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|s| serde_json::from_str(&s).ok())
+            .and_then(|s| noname_studio::project::de_archivo(&s))
             .unwrap_or_else(noname_studio::project::Project::demo);
         let (pr, ca) = (std::sync::atomic::AtomicU32::new(0), std::sync::atomic::AtomicBool::new(false));
         let t = std::time::Instant::now();
@@ -26,7 +26,9 @@ fn main() {
     }
     let autotest = args.iter().any(|a| a == "--autotest");
     let plugins = args.iter().position(|a| a == "--plugins").and_then(|i| args.get(i + 1).cloned());
-    if let Err(e) = noname_studio::run_desktop(autotest, plugins) {
+    // doble clic en un proyecto: Windows pasa la ruta del archivo como primer argumento
+    let archivo = args.iter().skip(1).find(|a| !a.starts_with("--") && std::path::Path::new(a.as_str()).is_file()).map(std::path::PathBuf::from);
+    if let Err(e) = noname_studio::run_desktop(autotest, plugins, archivo) {
         eprintln!("{e}");
     }
 }

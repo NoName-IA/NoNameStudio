@@ -704,7 +704,7 @@ impl StudioApp {
             let ext = f.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
             if ext == "mid" || ext == "midi" {
                 self.import_midi_path(f);
-            } else if ext == "json" {
+            } else if ext == "nns" || ext == "json" {
                 self.open_path(f.clone());
             } else if media::is_audio(f) {
                 match over_pl {

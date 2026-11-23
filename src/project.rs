@@ -1240,3 +1240,35 @@ pub struct PluginSlot {
     #[serde(default)]
     pub uid: u32,
 }
+
+/// Extensión de los proyectos (antes `.nns.json`; esos se siguen abriendo).
+pub const EXTENSION: &str = "nns";
+/// Identificador que va al principio de cada proyecto guardado.
+pub const FORMATO: &str = "NoName Studio";
+
+/// Texto del archivo de proyecto: el identificador de la app va primero y luego el proyecto.
+pub fn a_archivo(p: &Project) -> serde_json::Result<String> {
+    let cuerpo = serde_json::to_string_pretty(p)?;
+    let resto = cuerpo.strip_prefix('{').unwrap_or(&cuerpo);
+    Ok(format!(
+        "{{\n  \"formato\": \"{FORMATO}\",\n  \"creado_con\": \"NoName Studio {}\",{resto}",
+        env!("CARGO_PKG_VERSION")
+    ))
+}
+
+/// Lee un proyecto. Si trae identificador debe ser el de NoName Studio; los archivos viejos (sin él) también valen.
+pub fn de_archivo(s: &str) -> Option<Project> {
+    let v: serde_json::Value = serde_json::from_str(s).ok()?;
+    if let Some(f) = v.get("formato") {
+        if f.as_str() != Some(FORMATO) {
+            return None;
+        }
+    }
+    serde_json::from_value(v).ok()
+}
+
+/// ¿El archivo tiene pinta de proyecto (por su nombre)?
+pub fn es_ruta_proyecto(p: &std::path::Path) -> bool {
+    let n = p.to_string_lossy().to_lowercase();
+    n.ends_with(".nns") || n.ends_with(".json")
+}

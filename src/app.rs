@@ -774,7 +774,7 @@ impl StudioApp {
     /// Guarda en el archivo del proyecto (o pide dónde si es nuevo o `como`). Devuelve si se guardó.
     fn guardar(&mut self, como: bool) -> bool {
         self.plugins_store_state();
-        let json = match serde_json::to_string_pretty(&self.p) {
+        let json = match crate::project::a_archivo(&self.p) {
             Ok(s) => s,
             Err(e) => {
                 self.msg = format!("Error al guardar: {e}");
@@ -797,14 +797,14 @@ impl StudioApp {
         #[cfg(not(target_os = "android"))]
         let path = rfd::FileDialog::new()
             .set_title("Guardar proyecto")
-            .add_filter("Proyecto NoName Studio", &["nns.json", "json"])
+            .add_filter("Proyecto NoName Studio", &["nns"])
             .set_directory(&self.plat.export_dir)
-            .set_file_name(format!("{}.nns.json", export::safe_name(&self.p.name)))
+            .set_file_name(format!("{}.nns", export::safe_name(&self.p.name)))
             .save_file();
         #[cfg(target_os = "android")]
         let path = {
             let _ = std::fs::create_dir_all(&self.plat.export_dir);
-            Some(self.plat.export_dir.join(format!("{}.nns.json", export::safe_name(&self.p.name))))
+            Some(self.plat.export_dir.join(format!("{}.nns", export::safe_name(&self.p.name))))
         };
         match path {
             Some(path) => match std::fs::write(&path, json) {
@@ -825,7 +825,7 @@ impl StudioApp {
     fn open_project_dialog(&mut self) {
         #[cfg(not(target_os = "android"))]
         {
-            if let Some(path) = rfd::FileDialog::new().set_title("Abrir proyecto").add_filter("Proyecto NoName Studio", &["json"]).set_directory(&self.plat.export_dir).pick_file() {
+            if let Some(path) = rfd::FileDialog::new().set_title("Abrir proyecto").add_filter("Proyecto NoName Studio", &["nns", "json"]).set_directory(&self.plat.export_dir).pick_file() {
                 self.open_path(path);
             }
         }
@@ -836,7 +836,7 @@ impl StudioApp {
                 if let Ok(rd) = std::fs::read_dir(d) {
                     for e in rd.flatten() {
                         let p = e.path();
-                        if p.to_string_lossy().ends_with(".json") && !p.ends_with("autosave.json") {
+                        if crate::project::es_ruta_proyecto(&p) && !p.ends_with("autosave.json") {
                             v.push(p);
                         }
                     }
@@ -845,8 +845,14 @@ impl StudioApp {
             self.open_list = Some(v);
         }
     }
+    /// Abre el proyecto con el que se lanzó la app (doble clic en un archivo .nns).
+    pub fn abrir_al_iniciar(&mut self, path: PathBuf) {
+        // la copia de rescate se conserva para otra vez: ahora manda el archivo elegido
+        self.rescate = false;
+        self.open_path(path);
+    }
     fn open_path(&mut self, path: PathBuf) {
-        match std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str::<Project>(&s).ok()) {
+        match std::fs::read_to_string(&path).ok().and_then(|s| crate::project::de_archivo(&s)) {
             Some(p) if !p.patterns.is_empty() && !p.channels.is_empty() => {
                 // otro archivo: el historial del proyecto anterior no se puede deshacer sobre este
                 // (si no, Guardar escribiría el proyecto viejo encima del archivo recién abierto)

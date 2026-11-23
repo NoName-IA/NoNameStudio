@@ -2,7 +2,7 @@
 use crate::project::*;
 use std::collections::HashMap;
 
-pub const TEMPLATES: [&str; 7] = ["Vacío", "Trap", "Reggaetón (dembow)", "Boom bap", "House", "Lo-fi", "Drill"];
+pub const TEMPLATES: [&str; 8] = ["Vacío", "Trap", "Reggaetón (dembow)", "Boom bap", "House", "Lo-fi", "Drill", "Trap oscuro «Neblina»"];
 pub const KITS: [&str; 6] = ["Boom bap polvoriento", "Trap 808", "Reggaetón", "House limpio", "Lo-fi suave", "Drill oscuro"];
 
 fn steps(n: usize, on: &[usize], v: f32) -> Vec<f32> {
@@ -42,6 +42,7 @@ pub fn build(i: usize) -> Project {
         4 => house(),
         5 => lofi(),
         6 => drill(),
+        7 => neblina(),
         _ => {
             let mut p = Project::empty("Proyecto nuevo", 120.0);
             for (inst, n, v) in [(Inst::Kick, "Kick", 0.9), (Inst::Snare, "Snare", 0.8), (Inst::Hat, "Hat", 0.55), (Inst::Synth, "NN Wave", 0.7)] {
@@ -94,6 +95,206 @@ fn trap() -> Project {
     }
     p.tracks[0] = "Batería".into();
     p.tracks[1] = "808 / Lead".into();
+    p
+}
+
+/// Pasos con velocidad propia: (paso, velocidad).
+fn vsteps(n: usize, on: &[(usize, f32)]) -> Vec<f32> {
+    let mut a = vec![0.0; n];
+    for &(i, v) in on {
+        if i < n {
+            a[i] = v;
+        }
+    }
+    a
+}
+
+/// Trap oscuro en La# menor frigio (la segunda menor, Si, le da el tono sombrío), 150 bpm a medio tiempo.
+/// Estructura de 32 compases: intro (4) · coro (8) · verso (8) · coro (8) · salida (4).
+fn neblina() -> Project {
+    let mut p = Project::empty("Neblina", 150.0);
+    p.key = 10; // La#
+    p.scale = 4; // frigia
+    p.swing = 0.06;
+    p.limiter.gain_db = 7.0;
+    let k = add(&mut p, Inst::Kick, "Kick", 0.9);
+    let cl = add(&mut p, Inst::Clap, "Clap", 0.75);
+    let sn = add(&mut p, Inst::Snare, "Snare capa", 0.45);
+    let rim = add(&mut p, Inst::Rim, "Rim fantasma", 0.3);
+    let h = add(&mut p, Inst::Hat, "Hi-hat", 0.42);
+    let o = add(&mut p, Inst::OHat, "Open Hat", 0.3);
+    let b = add(&mut p, Inst::Bass, "808", 0.95);
+    let bell = add(&mut p, Inst::Bell, "Campana", 0.42);
+    let pad = add(&mut p, Inst::Synth, "Pad niebla", 0.38);
+    let ld = add(&mut p, Inst::Synth, "Lead glide", 0.34);
+    apply_kit(&mut p, 5);
+    if let Some(c) = p.channel_mut(k) {
+        c.tune = -4.0;
+    }
+    if let Some(c) = p.channel_mut(sn) {
+        c.tune = -2.0;
+        c.rev = 0.15;
+    }
+    if let Some(c) = p.channel_mut(h) {
+        c.pan = 0.18;
+        c.hi = 1.0;
+    }
+    if let Some(c) = p.channel_mut(o) {
+        c.pan = -0.2;
+        c.rev = 0.2;
+    }
+    if let Some(c) = p.channel_mut(rim) {
+        c.pan = -0.3;
+        c.dly = 0.25;
+    }
+    if let Some(c) = p.channel_mut(b) {
+        c.comp = CompP::ducking(k);
+        c.comp.threshold = -24.0;
+        c.comp.ratio = 4.0;
+    }
+    if let Some(c) = p.channel_mut(bell) {
+        c.cut = 6000.0;
+        c.rev = 0.35;
+        c.dly = 0.3;
+        c.pan = 0.12;
+    }
+    if let Some(c) = p.channel_mut(pad) {
+        c.synth = SynthP::preset(11);
+        c.rev = 0.45;
+        c.space = 0.35;
+        c.cut = 3500.0;
+    }
+    if let Some(c) = p.channel_mut(ld) {
+        c.synth = SynthP::preset(18);
+        c.rev = 0.3;
+        c.dly = 0.35;
+        c.pan = -0.12;
+        c.cut = 4200.0;
+    }
+
+    // Batería del coro: bombo sincopado, clap en el 3, rim fantasma y hats con redobles
+    let mut dc = pattern(&mut p, "Batería coro", 2, 0);
+    dc.steps.insert(k, vsteps(32, &[(0, 0.98), (7, 0.8), (10, 0.9), (16, 0.98), (19, 0.75), (23, 0.7), (26, 0.9)]));
+    dc.steps.insert(cl, steps(32, &[8, 24], 0.92));
+    dc.steps.insert(sn, vsteps(32, &[(8, 0.8), (24, 0.8), (31, 0.4)]));
+    dc.steps.insert(rim, vsteps(32, &[(5, 0.35), (14, 0.3), (21, 0.35), (29, 0.3)]));
+    let mut hh: Vec<(usize, f32)> = Vec::new();
+    for i in 0..32usize {
+        let v = match i {
+            12..=15 => 0.3 + 0.08 * (i - 12) as f32, // redoble que sube
+            28..=31 => 0.62 - 0.08 * (i - 28) as f32, // redoble que baja
+            _ if i % 4 == 0 => 0.62,
+            _ if i % 2 == 0 => 0.45,
+            _ if i % 8 == 3 || i % 8 == 7 => 0.0,
+            _ => 0.28,
+        };
+        if v > 0.0 {
+            hh.push((i, v));
+        }
+    }
+    dc.steps.insert(h, vsteps(32, &hh));
+    dc.steps.insert(o, steps(32, &[22], 0.45));
+
+    // Batería del verso: más espacio, hats en corcheas
+    let mut dv = pattern(&mut p, "Batería verso", 2, 0);
+    dv.steps.insert(k, vsteps(32, &[(0, 0.95), (11, 0.8), (16, 0.95), (27, 0.75)]));
+    dv.steps.insert(cl, steps(32, &[8, 24], 0.85));
+    dv.steps.insert(rim, vsteps(32, &[(14, 0.3), (30, 0.3)]));
+    let hv: Vec<(usize, f32)> = (0..32usize).step_by(2).map(|i| (i, if i % 4 == 0 { 0.55 } else { 0.38 })).chain([(29, 0.3), (30, 0.4), (31, 0.5)]).collect();
+    dv.steps.insert(h, vsteps(32, &hv));
+
+    // 808: sigue al bombo, sube al Si (segunda frigia) y cae al Fa#
+    let mut m8 = pattern(&mut p, "808", 4, 1);
+    m8.notes.insert(
+        b,
+        vec![
+            note(0, 7, 34, 0.95),
+            note(7, 3, 34, 0.8),
+            note(10, 6, 46, 0.85),
+            note(16, 3, 35, 0.95),
+            note(19, 4, 35, 0.8),
+            note(23, 3, 34, 0.75),
+            note(26, 6, 34, 0.9),
+            note(32, 7, 34, 0.95),
+            note(39, 3, 34, 0.8),
+            note(42, 6, 41, 0.85),
+            note(48, 3, 30, 0.95),
+            note(51, 4, 30, 0.8),
+            note(55, 3, 29, 0.8),
+            note(58, 6, 29, 0.9),
+        ],
+    );
+
+    // Acordes en niebla: La#m · Si · La#m7 · Solb
+    let mut pd = pattern(&mut p, "Pad niebla", 4, 2);
+    let mut ac = chord_notes(58, &[0, 3, 7], 0, 16, 0.6);
+    ac.extend(chord_notes(59, &[0, 4, 7], 16, 16, 0.55));
+    ac.extend(chord_notes(58, &[0, 3, 7, 10], 32, 16, 0.6));
+    ac.extend(chord_notes(54, &[0, 4, 7], 48, 16, 0.55));
+    pd.notes.insert(pad, ac);
+
+    // Gancho de campana (4 compases)
+    let mut gb = pattern(&mut p, "Campana gancho", 4, 3);
+    gb.notes.insert(
+        bell,
+        vec![
+            note(0, 2, 82, 0.8),
+            note(3, 2, 83, 0.7),
+            note(6, 2, 82, 0.75),
+            note(8, 6, 77, 0.8),
+            note(14, 2, 78, 0.6),
+            note(16, 2, 80, 0.75),
+            note(19, 2, 78, 0.65),
+            note(22, 2, 77, 0.7),
+            note(24, 8, 73, 0.75),
+            note(32, 2, 82, 0.8),
+            note(35, 2, 83, 0.7),
+            note(38, 2, 85, 0.8),
+            note(40, 6, 83, 0.75),
+            note(46, 2, 82, 0.6),
+            note(48, 4, 78, 0.7),
+            note(52, 4, 77, 0.65),
+            note(56, 8, 70, 0.7),
+        ],
+    );
+
+    // Lead con glide: respuesta larga que se arrastra entre notas (solo en el coro)
+    let mut gl = pattern(&mut p, "Lead respuesta", 4, 4);
+    gl.notes.insert(ld, vec![note(8, 6, 70, 0.7), note(14, 2, 71, 0.6), note(16, 12, 73, 0.7), note(40, 4, 77, 0.7), note(44, 4, 75, 0.65), note(48, 4, 73, 0.65), note(52, 10, 71, 0.6)]);
+
+    let (dci, dvi, m8i, pdi, gbi, gli) = (dc.id, dv.id, m8.id, pd.id, gb.id, gl.id);
+    p.patterns = vec![dc, dv, m8, pd, gb, gl];
+    let clip = |p: &mut Project, track: u32, bar: u32, pat: u32| p.playlist.push(Clip { track, bar, pat });
+    // intro 0-3: pad + campana
+    clip(&mut p, 2, 0, pdi);
+    clip(&mut p, 3, 0, gbi);
+    // coros 4-11 y 20-27
+    for start in [4u32, 20] {
+        for bar in [start, start + 4] {
+            clip(&mut p, 2, bar, pdi);
+            clip(&mut p, 3, bar, gbi);
+            clip(&mut p, 1, bar, m8i);
+            clip(&mut p, 4, bar, gli);
+        }
+        for bar in (start..start + 8).step_by(2) {
+            clip(&mut p, 0, bar, dci);
+        }
+    }
+    // verso 12-19: batería suelta, 808 y pad; campana solo la segunda mitad
+    for bar in [12, 16] {
+        clip(&mut p, 1, bar, m8i);
+        clip(&mut p, 2, bar, pdi);
+    }
+    clip(&mut p, 3, 16, gbi);
+    for bar in (12..20).step_by(2) {
+        clip(&mut p, 0, bar, dvi);
+    }
+    // salida 28-31: se quedan el pad y la campana
+    clip(&mut p, 2, 28, pdi);
+    clip(&mut p, 3, 28, gbi);
+    for (i, n) in ["Batería", "808", "Pad", "Campana", "Lead"].iter().enumerate() {
+        p.tracks[i] = (*n).into();
+    }
     p
 }
 

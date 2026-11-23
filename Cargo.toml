@@ -32,7 +32,7 @@ midir = "0.11"
 [target.'cfg(windows)'.dependencies]
 clap-sys = "0.5"
 libloading = "0.8"
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_System_Registry", "Win32_UI_Shell"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "android-native-activity"] }
@@ -68,6 +68,26 @@ theme = "@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
 [package.metadata.android.application.activity]
 orientation = "sensorLandscape"
 config_changes = "orientation|screenSize|screenLayout|keyboardHidden|uiMode|density"
+# una sola pantalla de la app aunque se abra desde un archivo (no se puede tener dos motores a la vez)
+launch_mode = "singleTask"
+
+# abrir proyectos .nns desde el administrador de archivos
+[[package.metadata.android.application.activity.intent_filter]]
+actions = ["android.intent.action.VIEW"]
+categories = ["android.intent.category.DEFAULT", "android.intent.category.BROWSABLE"]
+data = [
+    { scheme = "content", host = "*", mime_type = "*/*", path_pattern = '.*\\.nns' },
+    { scheme = "content", host = "*", mime_type = "*/*", path_pattern = '.*\\..*\\.nns' },
+    { scheme = "content", host = "*", mime_type = "*/*", path_pattern = '.*\\..*\\..*\\.nns' },
+    { scheme = "file", host = "*", path_pattern = '.*\\.nns' },
+    { scheme = "file", host = "*", path_pattern = '.*\\..*\\.nns' },
+]
+
+# algunos administradores (como el de MIUI) mandan el archivo sin nombre visible, solo con tipo genérico
+[[package.metadata.android.application.activity.intent_filter]]
+actions = ["android.intent.action.VIEW"]
+categories = ["android.intent.category.DEFAULT"]
+data = [{ scheme = "content", mime_type = "application/x-nonamestudio" }]
 
 [[package.metadata.android.uses_permission]]
 name = "android.permission.RECORD_AUDIO"
