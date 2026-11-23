@@ -195,7 +195,7 @@ impl StudioApp {
             if sh.params.is_empty() {
                 continue;
             }
-            ui.menu_button(s.name.clone(), |ui| {
+            ui.menu_button(s.name.clone(), |ui| desplazable(ui, |ui| {
                 egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                     for p in sh.params.iter().take(400) {
                         if ui.button(&p.name).clicked() {
@@ -204,7 +204,7 @@ impl StudioApp {
                         }
                     }
                 });
-            });
+            }));
         }
         #[cfg(not(windows))]
         let _ = (ui, ch, slots);
@@ -250,7 +250,7 @@ impl StudioApp {
                         ui.label("Sin instrumento.");
                     }
                 }
-                ui.menu_button("Elegir instrumento…", |ui| {
+                ui.menu_button("Elegir instrumento…", |ui| desplazable(ui, |ui| {
                     let list: Vec<PluginInfo> = self.plug.list.iter().filter(|p| p.instrument).cloned().collect();
                     if list.is_empty() {
                         ui.label("No hay instrumentos CLAP. Usa «Buscar plugins».");
@@ -265,7 +265,7 @@ impl StudioApp {
                             }
                         }
                     });
-                });
+                }));
                 ui.separator();
             }
             ui.label(RichText::new("EFECTOS (en orden)").small().color(DIM));
@@ -302,7 +302,7 @@ impl StudioApp {
                 });
             }
             ui.horizontal(|ui| {
-                ui.menu_button("+ Agregar efecto", |ui| {
+                ui.menu_button("+ Agregar efecto", |ui| desplazable(ui, |ui| {
                     let list: Vec<PluginInfo> = self.plug.list.iter().filter(|p| !p.instrument).cloned().collect();
                     if list.is_empty() {
                         ui.label("No hay efectos CLAP. Usa «Buscar plugins».");
@@ -317,7 +317,7 @@ impl StudioApp {
                             }
                         }
                     });
-                });
+                }));
                 if ui.button("Buscar plugins").clicked() {
                     self.rescan_plugins();
                 }

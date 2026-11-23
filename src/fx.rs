@@ -401,6 +401,8 @@ pub struct WaveState {
     fg: f32,
     fk: f32,
     fa1: f32,
+    /// glide: nota desde la que se desliza
+    pub desde: Option<f32>,
 }
 impl WaveState {
     pub fn new(p: SynthP, seed: u32) -> WaveState {
@@ -408,7 +410,7 @@ impl WaveState {
         for (i, v) in ph.iter_mut().enumerate() {
             *v = ((seed.wrapping_mul(2654435761).wrapping_add(i as u32 * 40503)) >> 8) as f32 / (1u32 << 24) as f32;
         }
-        WaveState { p, ph, ic1: 0.0, ic2: 0.0, lfo: 0.0, inc: [0.0; 16], nivel: [0.0; 16], pos: [0.0; 16], activos: 0, m_listo: f32::NAN, sr_listo: 0.0, cuenta: 0, fg: 0.0, fk: 2.0, fa1: 1.0 }
+        WaveState { p, ph, ic1: 0.0, ic2: 0.0, lfo: 0.0, inc: [0.0; 16], nivel: [0.0; 16], pos: [0.0; 16], activos: 0, m_listo: f32::NAN, sr_listo: 0.0, cuenta: 0, fg: 0.0, fk: 2.0, fa1: 1.0, desde: None }
     }
     pub fn end_time(&self, len: f32) -> f32 {
         len + self.p.amp[3].max(0.005)
@@ -448,7 +450,15 @@ impl WaveState {
         let (rate, depth, target) = (self.p.lfo_rate, self.p.lfo_depth, self.p.lfo_target);
         self.lfo = (self.lfo + rate * dt).fract();
         let lfo = if depth != 0.0 { (self.lfo * TAU).sin() * depth } else { 0.0 };
-        let mul = if target == 2 && lfo != 0.0 { 2f32.powf(lfo * 2.0 / 12.0) } else { 1.0 };
+        let mut semis = if target == 2 { lfo * 2.0 } else { 0.0 };
+        // glide: empieza en la nota anterior y se desliza hasta la nueva
+        if let Some(d) = self.desde {
+            let g = self.p.glide.max(0.001);
+            if t < g {
+                semis += (d - m) * (1.0 - t / g);
+            }
+        }
+        let mul = if semis != 0.0 { 2f32.powf(semis / 12.0) } else { 1.0 };
         let extra_pos = if target == 1 { lfo * 2.0 } else { 0.0 };
         let tb = tables();
         let mut sum = 0.0;
@@ -462,7 +472,8 @@ impl WaveState {
         let p = &self.p;
         if self.cuenta % 16 == 0 {
             let fe = adsr(t, len, &p.fadsr);
-            let mut fc = p.cutoff * 2f32.powf(p.fenv * fe * 6.0);
+            // una nota fuerte abre el filtro (y una suave lo cierra)
+            let mut fc = p.cutoff * 2f32.powf(p.fenv * fe * 6.0 + p.vel_filtro * (vel - 0.7) * 4.0);
             if target == 0 && lfo != 0.0 {
                 fc *= 2f32.powf(lfo * 2.0);
             }

@@ -350,9 +350,13 @@ impl Voice {
     }
 
     /// Voz de NN Wave.
-    pub fn synth(ch: usize, delay: u32, vel: f32, m: f32, len: f32, p: SynthP, seed: u32, sr: f32) -> Voice {
+    /// `desde`: nota anterior del canal (para el glide), si la hay.
+    pub fn synth(ch: usize, delay: u32, vel: f32, m: f32, len: f32, p: SynthP, seed: u32, sr: f32, desde: Option<f32>) -> Voice {
         let mut v = Voice::new(ch, Inst::Synth, delay, vel, m, len, 0.0, 1.0, seed, sr);
-        let w = WaveState::new(p, seed);
+        let mut w = WaveState::new(p, seed);
+        if p.glide > 0.0 {
+            w.desde = desde.or(if p.glide > 0.0 && p.osc[1].on == false && p.amp[2] == 0.0 { Some(m + 12.0) } else { None });
+        }
         v.end = w.end_time(len.max(0.02));
         v.wave = Some(w);
         v

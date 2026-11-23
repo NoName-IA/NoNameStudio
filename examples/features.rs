@@ -544,6 +544,118 @@ fn main() {
     let t8 = tono(&noname_studio::fx::armonia(&la, sr, mascara, 0, Some(-12)));
     all &= ok((t3 - 72.0).abs() < 0.15 && (t5 - 76.0).abs() < 0.15 && (t8 - 57.0).abs() < 0.15, "Armonías (La en Do mayor)", format!("tercera arriba {t3:.2} (Do 72) · quinta {t5:.2} (Mi 76) · octava abajo {t8:.2} (La 57)"));
 
+    // 20. efectos NN: ninguno rompe el audio, el Pitcher sube una octava y el Tape Delay deja cola
+    {
+        use noname_studio::efectos::{Proceso, TipoEfecto};
+        let tono = sine(220.0, 1.0, 0.5);
+        let mut malos = vec![];
+        for t in TipoEfecto::TODOS {
+            let e = t.por_defecto();
+            let mut pr = Proceso::new(t, SR);
+            let (mut l, mut r) = (tono.data.clone(), tono.data.clone());
+            for (a, b) in l.chunks_mut(256).zip(r.chunks_mut(256)) {
+                pr.procesar(a, b, &e, 8.0);
+            }
+            let pk = l.iter().chain(r.iter()).fold(0f32, |m, x| m.max(x.abs()));
+            if !l.iter().chain(r.iter()).all(|x| x.is_finite()) || pk > 3.0 || (pk < 0.01 && t != TipoEfecto::TapeStop) {
+                malos.push(format!("{} (pico {pk:.2})", t.nombre()));
+            }
+        }
+        all &= ok(malos.is_empty(), "Efectos NN (13) estables", if malos.is_empty() { "todos suenan y sin valores inválidos".into() } else { malos.join(", ") });
+        // Pitcher +12
+        let mut e = TipoEfecto::Pitcher.por_defecto();
+        e.p[0] = 1.0;
+        let mut pr = Proceso::new(TipoEfecto::Pitcher, SR);
+        let (mut l, mut r) = (tono.data.clone(), tono.data.clone());
+        for (a, b) in l.chunks_mut(256).zip(r.chunks_mut(256)) {
+            pr.procesar(a, b, &e, 8.0);
+        }
+        let est: Vec<f32> = l.iter().zip(&r).flat_map(|(a, b)| [*a, *b]).collect();
+        let f = freq(seg(&est, 0.3, 0.9));
+        all &= ok((f - 440.0).abs() < 25.0, "Pitcher +12 semitonos", format!("220 Hz → {f:.0} Hz"));
+        // cola del Tape Delay
+        let mut pr = Proceso::new(TipoEfecto::TapeDelay, SR);
+        let e = TipoEfecto::TapeDelay.por_defecto();
+        let mut l: Vec<f32> = tono.data[..(SR * 0.2) as usize].to_vec();
+        l.resize((SR * 2.0) as usize, 0.0);
+        let mut r = l.clone();
+        for (a, b) in l.chunks_mut(256).zip(r.chunks_mut(256)) {
+            pr.procesar(a, b, &e, 8.0);
+        }
+        let cola = rms(&l[(SR * 0.6) as usize..(SR * 1.0) as usize]);
+        all &= ok(cola > 0.01, "Tape Delay deja eco", format!("eco {:.1} dB después del sonido", db(cola)));
+    }
+
+    // 21. efectos en un canal del proyecto (se renderizan en la canción)
+    {
+        let mut p = Project::empty("fx", 120.0);
+        let s = p.new_id();
+        let mut c = Channel::new(s, Inst::Bell);
+        c.efectos = vec![noname_studio::efectos::TipoEfecto::Chorus.por_defecto(), noname_studio::efectos::TipoEfecto::TranceDelay.por_defecto()];
+        p.channels.push(c);
+        p.master_efectos = vec![noname_studio::efectos::TipoEfecto::Spreader.por_defecto()];
+        let pid = p.new_id();
+        let mut pat = Pattern { id: pid, name: "a".into(), bars: 1, color: PALETTE[0], steps: Default::default(), notes: Default::default(), audio: Default::default() };
+        pat.notes.insert(s, vec![Note { s: 0, l: 2, m: 72, v: 1.0, o: 0.0 }]);
+        p.patterns.push(pat);
+        p.playlist.push(Clip { track: 0, bar: 0, pat: pid });
+        let a = render(&p, &Bank::default());
+        let mut q = p.clone();
+        q.channels[0].efectos.clear();
+        q.master_efectos.clear();
+        let b = render(&q, &Bank::default());
+        let (con, sin) = (db(rms(seg(&a, 0.5, 1.0))), db(rms(seg(&b, 0.5, 1.0))));
+        all &= ok(a.iter().all(|x| x.is_finite()) && con > sin + 10.0, "Efectos en la canción (Chorus + Trance Delay + Spreader)", format!("de 0,5 a 1 s: con efectos {con:.1} dB · sin efectos {sin:.1} dB"));
+    }
+
+    // 22. glide: el Tom 808 cae desde una octava arriba
+    {
+        let mut p = Project::empty("glide", 120.0);
+        p.limiter.on = false;
+        p.master_comp.on = false;
+        let s = p.new_id();
+        let mut c = Channel::new(s, Inst::Synth);
+        c.synth = SynthP::preset(16);
+        c.synth.glide = 0.15;
+        p.channels.push(c);
+        let pid = p.new_id();
+        let mut pat = Pattern { id: pid, name: "a".into(), bars: 1, color: PALETTE[0], steps: Default::default(), notes: Default::default(), audio: Default::default() };
+        pat.notes.insert(s, vec![Note { s: 0, l: 8, m: 57, v: 1.0, o: 0.0 }]);
+        p.patterns.push(pat);
+        p.playlist.push(Clip { track: 0, bar: 0, pat: pid });
+        let a = render(&p, &Bank::default());
+        let (f0, f1) = (freq(seg(&a, 0.005, 0.05)), freq(seg(&a, 0.25, 0.5)));
+        all &= ok(f0 > f1 * 1.3, "Glide (Tom 808 cae de tono)", format!("{f0:.0} Hz al inicio → {f1:.0} Hz"));
+    }
+
+    // 23. precuenta: 1 compás de metrónomo y después arranca la canción
+    {
+        let mut p = Project::empty("pre", 120.0);
+        p.limiter.on = false;
+        let k = p.new_id();
+        p.channels.push(Channel::new(k, Inst::Kick));
+        let pid = p.new_id();
+        let mut pat = Pattern { id: pid, name: "p".into(), bars: 1, color: PALETTE[0], steps: Default::default(), notes: Default::default(), audio: Default::default() };
+        pat.steps.insert(k, (0..16).map(|i| if i == 0 { 1.0 } else { 0.0 }).collect());
+        p.patterns.push(pat);
+        p.playlist.push(Clip { track: 0, bar: 0, pat: pid });
+        let st = Arc::new(Status::new());
+        st.metro_vol.store(0f32.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        let mut e = Engine::new(SR, p.clone(), st);
+        e.offline = true;
+        e.handle(Cmd::Precuenta(16));
+        e.start(Mode::Song, 0);
+        let mut buf = vec![0f32; 512];
+        let mut out = vec![];
+        while out.len() < (SR * 3.0) as usize * 2 {
+            e.render(&mut buf);
+            out.extend_from_slice(&buf);
+        }
+        let inicio = out.iter().position(|x| x.abs() > 0.05).map(|i| i as f32 / 2.0 / SR).unwrap_or(-1.0);
+        let esperado = 16.0 * p.step_secs() as f32;
+        all &= ok((inicio - esperado).abs() < 0.02, "Precuenta (1 compás)", format!("el primer golpe suena a {inicio:.3} s (esperado {esperado:.3} s)"));
+    }
+
     let _ = render_song_with;
     println!("{}", if all { "TODO OK" } else { "HAY FALLAS" });
     if !all {

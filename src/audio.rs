@@ -15,20 +15,53 @@ pub struct AudioOut {
     pub device: String,
 }
 
+/// Nombre que se muestra de un dispositivo. En el teléfono se traduce a algo claro
+/// («Micrófono del teléfono», «Audífonos con cable», «Bluetooth: …») y se ignoran los internos raros.
 fn nombre(d: &cpal::Device) -> String {
-    d.description().map(|x| x.name().to_string()).unwrap_or_default()
+    let Ok(x) = d.description() else { return String::new() };
+    #[cfg(target_os = "android")]
+    {
+        use cpal::{DeviceType as T, InterfaceType as I};
+        // Android lo nombra «producto (tipo)»: nos quedamos con el producto
+        let prod = x.name().rsplit_once(" (").map(|(a, _)| a).unwrap_or(x.name()).trim().to_string();
+        return match (x.interface_type(), x.device_type()) {
+            (I::Bluetooth, _) => format!("Bluetooth: {prod}"),
+            (I::Usb, _) => format!("USB: {prod}"),
+            (_, T::Headset) | (_, T::Headphones) => "Audífonos con cable".into(),
+            (I::BuiltIn, T::Microphone) => "Micrófono del teléfono".into(),
+            (I::BuiltIn, T::Speaker) => "Altavoz del teléfono".into(),
+            _ => String::new(),
+        };
+    }
+    #[allow(unreachable_code)]
+    x.name().to_string()
+}
+
+/// Lista sin nombres vacíos ni repetidos (el teléfono tiene varios micrófonos internos: se muestra uno).
+fn unicos(it: impl Iterator<Item = String>) -> Vec<String> {
+    let mut v: Vec<String> = vec![];
+    for n in it {
+        if !n.is_empty() && !v.contains(&n) {
+            v.push(n);
+        }
+    }
+    v
 }
 
 /// Nombres de las salidas de audio (parlantes, audífonos…).
 pub fn outputs() -> Vec<String> {
     let host = cpal::default_host();
-    host.output_devices().map(|it| it.map(|d| nombre(&d)).filter(|n| !n.is_empty()).collect()).unwrap_or_default()
+    host.output_devices().map(|it| unicos(it.map(|d| nombre(&d)))).unwrap_or_default()
 }
 /// Nombres de las entradas de audio (micrófonos).
 pub fn inputs() -> Vec<String> {
     let host = cpal::default_host();
-    host.input_devices().map(|it| it.map(|d| nombre(&d)).filter(|n| !n.is_empty()).collect()).unwrap_or_default()
+    host.input_devices().map(|it| unicos(it.map(|d| nombre(&d)))).unwrap_or_default()
 }
+
+/// Nombre del dispositivo elegido por defecto (entrada o salida).
+pub const PREDETERMINADO_ENTRADA: &str = "Micrófono predeterminado";
+pub const PREDETERMINADO_SALIDA: &str = "Salida predeterminada";
 
 /// `salida` = nombre del dispositivo ("" = el predeterminado); `buffer` = cuadros por bloque (0 = automático).
 pub fn start(proj: Project, status: Arc<Status>, salida: &str, buffer: u32) -> Result<AudioOut, String> {
@@ -65,10 +98,14 @@ pub fn start(proj: Project, status: Arc<Status>, salida: &str, buffer: u32) -> R
         }
     }
     let (ttx, trx) = channel();
-    let mut engine = Engine::new(sr as f32, proj, status);
+    let mut engine = Engine::new(sr as f32, proj, status.clone());
     engine.set_trash(ttx);
     let mut filler = Filler { engine, rx, scratch: vec![0.0; 8192] };
-    let err = |e| eprintln!("audio: {e}");
+    let caido = status.clone();
+    let err = move |e| {
+        eprintln!("audio: {e}");
+        caido.audio_caido.store(true, std::sync::atomic::Ordering::Relaxed);
+    };
 
     let stream = match fmt {
         cpal::SampleFormat::F32 => dev.build_output_stream(
@@ -137,7 +174,11 @@ pub fn record(status: Arc<Status>, entrada: &str, guardar: bool, canal: usize) -
     if let Ok(mut q) = status.monitor.cola.lock() {
         q.clear();
     }
-    let err = |e| eprintln!("micrófono: {e}");
+    let caido = status.clone();
+    let err = move |e| {
+        eprintln!("micrófono: {e}");
+        caido.mic_caido.store(true, std::sync::atomic::Ordering::Relaxed);
+    };
     let push = {
         let buf = buf.clone();
         move |frames: &mut dyn Iterator<Item = f32>| {
@@ -189,6 +230,102 @@ pub fn request_mic() -> bool {
     request_perm("android.permission.RECORD_AUDIO")
 }
 
+/// La actividad de Android (se guarda al iniciar; los permisos se piden sobre ella).
+#[cfg(target_os = "android")]
+pub static ACTIVIDAD: std::sync::atomic::AtomicPtr<std::ffi::c_void> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+#[cfg(target_os = "android")]
+fn actividad(ctx: &ndk_context::AndroidContext) -> jni::objects::JObject<'static> {
+    let a = ACTIVIDAD.load(std::sync::atomic::Ordering::Relaxed);
+    let p = if a.is_null() { ctx.context() } else { a };
+    unsafe { jni::objects::JObject::from_raw(p.cast()) }
+}
+
+/// ¿Ya está concedido este permiso?
+#[cfg(target_os = "android")]
+pub fn permiso_concedido(nombre: &str) -> bool {
+    use jni::objects::JValue;
+    let ctx = ndk_context::android_context();
+    let Ok(vm) = (unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }) else { return false };
+    let Ok(mut env) = vm.attach_current_thread() else { return false };
+    let act = actividad(&ctx);
+    let r = (|| -> jni::errors::Result<bool> {
+        let perm = env.new_string(nombre)?;
+        Ok(env.call_method(&act, "checkSelfPermission", "(Ljava/lang/String;)I", &[JValue::Object(&perm)])?.i()? == 0)
+    })();
+    if r.is_err() {
+        let _ = env.exception_clear();
+    }
+    r.unwrap_or(false)
+}
+
+/// ¿La pantalla de la app tiene el foco? (false mientras se ve el aviso de permisos del sistema)
+#[cfg(target_os = "android")]
+pub fn ventana_con_foco() -> bool {
+    let ctx = ndk_context::android_context();
+    let Ok(vm) = (unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }) else { return false };
+    let Ok(mut env) = vm.attach_current_thread() else { return false };
+    let act = actividad(&ctx);
+    match env.call_method(&act, "hasWindowFocus", "()Z", &[]).and_then(|v| v.z()) {
+        Ok(b) => b,
+        Err(_) => {
+            let _ = env.exception_clear();
+            false
+        }
+    }
+}
+
+/// Cierra la app.
+#[cfg(target_os = "android")]
+pub fn cerrar_app() {
+    let ctx = ndk_context::android_context();
+    if let Ok(vm) = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) } {
+        if let Ok(mut env) = vm.attach_current_thread() {
+            let act = actividad(&ctx);
+            let _ = env.call_method(&act, "finishAndRemoveTask", "()V", &[]);
+            let _ = env.exception_clear();
+        }
+    }
+    std::process::exit(0);
+}
+
+/// Pide de una vez los permisos que falten (un solo aviso del sistema).
+#[cfg(target_os = "android")]
+pub fn pedir_permisos(nombres: &[&str]) -> String {
+    use jni::objects::{JObject, JValue};
+    fn inner(env: &mut jni::JNIEnv, act: &JObject, nombres: &[&str]) -> jni::errors::Result<()> {
+        let mut faltan = vec![];
+        for n in nombres {
+            let perm = env.new_string(n)?;
+            let st = env.call_method(act, "checkSelfPermission", "(Ljava/lang/String;)I", &[JValue::Object(&perm)])?.i()?;
+            if st != 0 {
+                faltan.push(perm);
+            }
+        }
+        if faltan.is_empty() {
+            return Ok(());
+        }
+        let arr = env.new_object_array(faltan.len() as i32, "java/lang/String", &faltan[0])?;
+        for (i, p) in faltan.iter().enumerate() {
+            env.set_object_array_element(&arr, i as i32, p)?;
+        }
+        env.call_method(act, "requestPermissions", "([Ljava/lang/String;I)V", &[JValue::Object(&arr), JValue::Int(8)])?;
+        Ok(())
+    }
+    let ctx = ndk_context::android_context();
+    let Ok(vm) = (unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }) else { return "sin VM".into() };
+    let Ok(mut env) = vm.attach_current_thread() else { return "sin hilo".into() };
+    let act = actividad(&ctx);
+    match inner(&mut env, &act, nombres) {
+        Ok(()) => "pedidos".into(),
+        Err(e) => {
+            let _ = env.exception_describe();
+            let _ = env.exception_clear();
+            format!("error {e}")
+        }
+    }
+}
+
 /// Pide un permiso de Android en tiempo de ejecución. Devuelve true si ya está concedido.
 #[cfg(target_os = "android")]
 pub fn request_perm(name: &str) -> bool {
@@ -206,6 +343,6 @@ pub fn request_perm(name: &str) -> bool {
     let ctx = ndk_context::android_context();
     let Ok(vm) = (unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }) else { return false };
     let Ok(mut env) = vm.attach_current_thread() else { return false };
-    let act = unsafe { JObject::from_raw(ctx.context().cast()) };
+    let act = actividad(&ctx);
     inner(&mut env, &act, name).unwrap_or(false)
 }

@@ -53,6 +53,13 @@ pub(super) struct Settings {
     pub canal_entrada: u8,
     /// la voz grabada pasa por el mismo nivelador que cuando te escuchas
     pub nivelar_grabacion: bool,
+    /// metrónomo: volumen, sonido, acento en el primer tiempo y subdivisión
+    pub metro_vol: f32,
+    pub metro_sonido: u8,
+    pub metro_acento: bool,
+    pub metro_sub: u8,
+    /// compases de precuenta antes de grabar (0 = sin precuenta)
+    pub precuenta: u8,
     /// paneo y reverberación de la voz que te escuchas; ajustes avanzados de NN Tune a la vista
     #[serde(default)]
     pub pan_escucha: f32,
@@ -112,6 +119,11 @@ impl Default for Settings {
             vol_escucha: 0.5,
             canal_entrada: 0,
             nivelar_grabacion: true,
+            metro_vol: 0.8,
+            metro_sonido: 0,
+            metro_acento: true,
+            metro_sub: 0,
+            precuenta: 1,
             pan_escucha: 0.0,
             reverb_escucha: 0.0,
             tune_avanzado: false,
@@ -181,6 +193,8 @@ pub(super) struct TrackRec {
     pub started: Instant,
     /// carril de la playlist donde se dibuja y se guardan las tomas
     pub track: u32,
+    /// segundos de precuenta al principio de la grabación (se descartan)
+    pub precuenta_s: f32,
 }
 
 pub(super) enum FileMsg {
@@ -234,12 +248,24 @@ pub(super) fn aplicar_voz_fx(c: &mut Channel, i: usize) {
 }
 
 /// Estilos de mastering: nombre, descripción, (graves, medios, presencia, agudos) en dB y razón del compresor.
-pub(super) const MASTER_ESTILOS: [(&str, &str, [f32; 4], f32); 4] = [
+pub(super) const MASTER_ESTILOS: [(&str, &str, [f32; 4], f32); 8] = [
     ("Universal", "Equilibrado para cualquier género", [0.6, 0.0, 0.3, 0.9], 2.0),
     ("Fuego", "Graves gordos y mucha pegada (trap, reggaetón, drill)", [2.6, -1.0, 0.6, 1.6], 3.0),
     ("Claridad", "Voces al frente, limpio y brillante", [-0.4, -1.5, 1.6, 2.0], 2.2),
     ("Cinta", "Cálido y suave, como en una cinta analógica", [1.2, 0.6, -0.4, -2.2], 1.7),
+    ("Equilibrio", "Suave y parejo, sin exagerar nada (acústico, baladas)", [0.3, 0.3, 0.2, 0.4], 1.6),
+    ("Espacio", "Abierto y aireado, con agudos sedosos (R&B, ambient)", [0.0, -0.8, 0.4, 2.4], 1.8),
+    ("Cine", "Grande y profundo: graves amplios y más dinámica", [1.8, -0.6, 0.2, 1.0], 1.5),
+    ("Brillo", "Pop moderno: brillante y con pegada", [1.0, -0.8, 1.2, 2.6], 2.6),
 ];
+/// Valores de una intensidad continua (0 = ligero, 1 = normal, 2 = pesado): (LUFS objetivo, cuánto se marca el estilo).
+pub(super) fn int_valores(x: f32) -> (f32, f32) {
+    let x = x.clamp(0.0, 2.0);
+    let i = (x.floor() as usize).min(1);
+    let f = x - i as f32;
+    let (a, b) = (MASTER_INT[i], MASTER_INT[i + 1]);
+    (a.1 + (b.1 - a.1) * f, a.2 + (b.2 - a.2) * f)
+}
 /// Intensidad del mastering: nombre, sonoridad objetivo (LUFS) y cuánto se marca el estilo.
 pub(super) const MASTER_INT: [(&str, f32, f32); 3] = [("Ligero", -16.0, 0.6), ("Normal", -13.0, 1.0), ("Pesado", -9.5, 1.3)];
 
@@ -264,9 +290,10 @@ pub(super) fn balance_3(a: &[f32], sr: f32) -> [f32; 3] {
 }
 
 /// Ecualizador y compresor del master para un estilo, intensidad y ajustes (graves/medios/agudos en dB).
-pub(super) fn cadena_master(estilo: usize, int: usize, eq3: [f32; 3]) -> ([Band; 6], CompP) {
+pub(super) fn cadena_master(estilo: usize, int: f32, eq3: [f32; 3]) -> ([Band; 6], CompP) {
     let (_, _, e, ratio) = MASTER_ESTILOS[estilo.min(MASTER_ESTILOS.len() - 1)];
-    let k = MASTER_INT[int.min(2)].2;
+    let int = int.clamp(0.0, 2.0);
+    let k = int_valores(int).1;
     let mut eq = default_eq();
     eq[0].on = true;
     eq[0].freq = 28.0;
@@ -274,7 +301,7 @@ pub(super) fn cadena_master(estilo: usize, int: usize, eq3: [f32; 3]) -> ([Band;
     eq[2].gain = (e[1] * k + eq3[1] * 0.6).clamp(-9.0, 9.0);
     eq[3].gain = (e[2] * k + eq3[1] * 0.4).clamp(-9.0, 9.0);
     eq[4].gain = (e[3] * k + eq3[2]).clamp(-9.0, 9.0);
-    let comp = CompP { on: true, threshold: -16.0 - 2.0 * int as f32, ratio: ratio * (0.85 + 0.15 * int as f32), attack_ms: if estilo == 3 { 30.0 } else { 20.0 }, release_ms: 180.0, makeup: 0.0, sc: 0 };
+    let comp = CompP { on: true, threshold: -16.0 - 2.0 * int, ratio: ratio * (0.85 + 0.15 * int), attack_ms: if estilo == 3 || estilo == 6 { 30.0 } else { 20.0 }, release_ms: 180.0, makeup: 0.0, sc: 0 };
     (eq, comp)
 }
 
@@ -543,6 +570,128 @@ impl StudioApp {
         }
     }
 
+    /// Selector de audio del teléfono: muestra tus carpetas y archivos de audio; al tocar uno se importa.
+    pub(super) fn selector_audio(&mut self, ctx: &egui::Context) {
+        let Some(dir) = self.elegir_audio.clone() else { return };
+        // al abrir el selector se pide (una vez) el permiso de los archivos de audio
+        #[cfg(target_os = "android")]
+        if dir.is_none() && self.elegir_cache.is_none() {
+            audio::pedir_permisos(&["android.permission.READ_MEDIA_AUDIO", "android.permission.READ_EXTERNAL_STORAGE"]);
+            self.elegir_cache = Some((PathBuf::new(), vec![]));
+        }
+        // contenido de la carpeta (se lee una vez al entrar)
+        let lista: Vec<(String, PathBuf, bool)> = match &dir {
+            None => {
+                let mut v: Vec<(String, PathBuf, bool)> = self.browser_roots().into_iter().map(|(n, p)| (n, p, true)).collect();
+                #[cfg(target_os = "android")]
+                for (n, d) in [("Audios de WhatsApp", "/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Audio"), ("Documentos", "/storage/emulated/0/Documents"), ("Todo el teléfono", "/storage/emulated/0")] {
+                    let p = PathBuf::from(d);
+                    if p.is_dir() {
+                        v.push((n.to_string(), p, true));
+                    }
+                }
+                v
+            }
+            Some(d) => {
+                if self.elegir_cache.as_ref().map(|c| &c.0) != Some(d) {
+                    let mut v: Vec<(String, PathBuf, bool)> = std::fs::read_dir(d)
+                        .map(|it| {
+                            it.filter_map(|e| e.ok())
+                                .map(|e| e.path())
+                                .filter(|p| !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')))
+                                .filter(|p| p.is_dir() || media::is_audio(p))
+                                .map(|p| (p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), p.clone(), p.is_dir()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    v.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.to_lowercase().cmp(&b.0.to_lowercase())));
+                    self.elegir_cache = Some((d.clone(), v));
+                }
+                self.elegir_cache.as_ref().map(|c| c.1.clone()).unwrap_or_default()
+            }
+        };
+        let pantalla = ctx.content_rect();
+        let mut ir: Option<Option<PathBuf>> = None;
+        let mut cerrar = false;
+        let mut elegido: Option<PathBuf> = None;
+        egui::Area::new(egui::Id::new("sel_fondo")).order(egui::Order::Foreground).fixed_pos(pantalla.min).show(ctx, |ui| {
+            let (r, resp) = ui.allocate_exact_size(pantalla.size(), Sense::click());
+            ui.painter().rect_filled(r, 0, Color32::from_black_alpha(160));
+            if resp.clicked() {
+                cerrar = true;
+            }
+        });
+        let ancho = (pantalla.width() - 40.0).min(620.0).max(200.0);
+        let alto = (pantalla.height() - 40.0).min(560.0);
+        egui::Area::new(egui::Id::new("sel_audio")).order(egui::Order::Tooltip).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+            Frame::new().fill(PANEL).stroke(Stroke::new(1.0, LINE)).corner_radius(16).inner_margin(Margin::same(14)).show(ui, |ui| {
+                ui.set_width(ancho);
+                ui.set_height(alto);
+                ui.horizontal(|ui| {
+                    if dir.is_some() && ui.add(egui::Button::new("Atrás").min_size(Vec2::new(80.0, 34.0))).clicked() {
+                        // a la carpeta de arriba (o a la lista de lugares)
+                        let arriba = dir.as_ref().and_then(|d| d.parent().map(|p| p.to_path_buf())).filter(|p| p.starts_with("/storage/emulated/0") || !cfg!(target_os = "android"));
+                        let raiz = self.browser_roots().iter().any(|(_, p)| Some(p) == dir.as_ref());
+                        ir = Some(if raiz { None } else { arriba });
+                    }
+                    ui.label(RichText::new(if dir.is_none() { "Elegir audio" } else { "Elige un audio o una carpeta" }).strong().size(16.0).color(Color32::WHITE));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.add(egui::Button::new("Cerrar").min_size(Vec2::new(80.0, 34.0))).clicked() {
+                            cerrar = true;
+                        }
+                    });
+                });
+                if let Some(d) = &dir {
+                    ui.add(egui::Label::new(RichText::new(d.display().to_string()).small().color(DIM)).truncate());
+                }
+                ui.add_space(6.0);
+                egui::ScrollArea::vertical().id_salt("sel_lista").auto_shrink([false, false]).show(ui, |ui| {
+                    if lista.is_empty() {
+                        ui.label(RichText::new("No hay audios aquí. Si el teléfono pidió permiso para acceder a tus archivos de música, acéptalo.").color(DIM));
+                    }
+                    for (n, p, carpeta) in &lista {
+                        let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 42.0), Sense::click());
+                        let pt = ui.painter();
+                        if resp.hovered() || resp.is_pointer_button_down_on() {
+                            pt.rect_filled(r, 10, Color32::from_gray(32));
+                        }
+                        // ícono: carpeta o nota
+                        let c = Pos2::new(r.left() + 20.0, r.center().y);
+                        if *carpeta {
+                            pt.rect_filled(Rect::from_center_size(c + Vec2::new(0.0, 2.0), Vec2::new(20.0, 13.0)), 2, Color32::from_gray(150));
+                            pt.rect_filled(Rect::from_min_size(c + Vec2::new(-10.0, -7.0), Vec2::new(9.0, 4.0)), 1, Color32::from_gray(150));
+                        } else {
+                            pt.circle_filled(c + Vec2::new(-3.0, 5.0), 4.0, ACCENT);
+                            pt.line_segment([c + Vec2::new(1.0, 5.0), c + Vec2::new(1.0, -8.0)], Stroke::new(1.8, ACCENT));
+                            pt.line_segment([c + Vec2::new(1.0, -8.0), c + Vec2::new(7.0, -5.0)], Stroke::new(1.8, ACCENT));
+                        }
+                        pt.with_clip_rect(r.shrink(2.0)).text(Pos2::new(r.left() + 42.0, r.center().y), Align2::LEFT_CENTER, n, FontId::proportional(14.5), if *carpeta { Color32::WHITE } else { Color32::from_gray(225) });
+                        if resp.clicked() {
+                            if *carpeta {
+                                ir = Some(Some(p.clone()));
+                            } else {
+                                elegido = Some(p.clone());
+                            }
+                        }
+                    }
+                });
+            });
+        });
+        if let Some(p) = elegido {
+            let t = self.free_track(self.play_from, 16);
+            self.import_to_playlist(&p, t, self.play_from);
+            cerrar = true;
+        }
+        if let Some(d) = ir {
+            self.elegir_audio = Some(d);
+            self.elegir_cache = None;
+        }
+        if cerrar {
+            self.elegir_audio = None;
+            self.elegir_cache = None;
+        }
+    }
+
     /// Archivos soltados sobre la ventana desde el explorador.
     pub(super) fn handle_dropped(&mut self, ctx: &egui::Context) {
         let files: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| p.is_file()).collect());
@@ -802,15 +951,18 @@ impl StudioApp {
                 self.pl_bw = (self.pl_bw * 1.3).min(240.0);
             }
             if ui.button("Importar audio…").clicked() {
-                if let Some(p) = self.pick_audio() {
+                // en el teléfono se abre el selector de archivos del teléfono; en la PC, el de Windows
+                if self.plat.mobile {
+                    self.elegir_audio = Some(None);
+                } else if let Some(p) = self.pick_audio() {
                     let t = self.free_track(self.play_from, 16);
                     self.import_to_playlist(&p, t, self.play_from);
-                } else if self.plat.mobile {
-                    self.left_tab = 1;
                 }
             }
             if self.settings.ayudas {
-                ui.label(RichText::new("Clic: patrón · arrastrar: mover · borde: largo · clic derecho: menú · regla: tocar / arrastrar: bucle").small().color(DIM));
+                if !self.plat.mobile {
+                    ui.label(RichText::new("Clic: patrón · arrastrar: mover · borde: largo · clic derecho: menú · regla: tocar / arrastrar: bucle").small().color(DIM));
+                }
             }
         });
     }
@@ -957,7 +1109,8 @@ impl StudioApp {
         let bw = self.pl_bw;
         let song = self.p.song_bars();
         let bars = (song + 8).max(32);
-        let (tn, rul) = (236.0, 28.0);
+        // cabeceras de pista más angostas en el teléfono
+        let (tn, rul) = (if self.plat.mobile { 168.0 } else { 236.0 }, 28.0);
         let ntr = self.p.tracks.len();
         let size = Vec2::new(tn + bars as f32 * bw, rul + ntr as f32 * TH);
         let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
@@ -1368,7 +1521,7 @@ impl StudioApp {
         m.opened += 1;
         let (kind, id, idx, pos, step, opened) = (m.kind, m.id, m.idx, m.pos, m.step, m.opened);
         let mut close = false;
-        let area = egui::Area::new(egui::Id::new("plmenu")).fixed_pos(pos).order(egui::Order::Foreground).show(ctx, |ui| {
+        let area = egui::Area::new(egui::Id::new("plmenu")).fixed_pos(pos).order(egui::Order::Foreground).show(ctx, |ui| desplazable(ui, |ui| {
             Frame::menu(ui.style()).show(ui, |ui| {
                 ui.set_min_width(190.0);
                 match kind {
@@ -1491,6 +1644,14 @@ impl StudioApp {
                                 self.edit_clip(id, |x| x.gain = (x.gain * 1.413).min(4.0));
                             }
                         });
+                        if ui.button("Normalizar (subir al máximo sin saturar)").clicked() {
+                            self.normalizar_clip(id);
+                            close = true;
+                        }
+                        if ui.button("Recortar silencio del principio y del final").clicked() {
+                            self.recortar_silencio(id);
+                            close = true;
+                        }
                         if ui.add(egui::Button::selectable(c.reverse, "Invertir (al revés)")).clicked() {
                             self.edit_clip(id, |x| x.reverse = !x.reverse);
                             close = true;
@@ -1550,7 +1711,7 @@ impl StudioApp {
                     }
                 }
             });
-        });
+        }));
         let outside = ctx.input(|i| i.pointer.any_pressed()) && ctx.input(|i| i.pointer.interact_pos()).is_some_and(|p| !area.response.rect.contains(p));
         if close || (outside && opened > 1) || ctx.input(|i| i.key_pressed(Key::Escape)) {
             self.pl_menu = None;
@@ -1655,6 +1816,84 @@ impl StudioApp {
             c.len = c.len.max(1);
         }
         self.send();
+    }
+
+    /// Sube la ganancia del clip para que su pico quede justo debajo del máximo.
+    pub(super) fn normalizar_clip(&mut self, id: u32) {
+        let Some(c) = self.p.audio_clip(id).cloned() else { return };
+        let Some(path) = media::resolve(&self.plat.data_dir, c.file()) else {
+            self.msg = "No se encuentra el audio del clip.".into();
+            return;
+        };
+        let b = match media::decode(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.msg = format!("No se pudo leer el audio: {e}");
+                return;
+            }
+        };
+        // solo el tramo que suena en la playlist
+        let ratio = c.ratio(self.p.bpm);
+        let ini = (c.off * b.sr as f32) as usize;
+        let fin = (ini + (c.len as f32 * self.p.step_secs() as f32 / ratio * b.sr as f32) as usize).min(b.frames());
+        let mut pico = 0f32;
+        for i in ini.min(fin)..fin {
+            let (l, r) = b.at(i);
+            pico = pico.max(l.abs()).max(r.abs());
+        }
+        if pico < 1e-5 {
+            self.msg = "El clip está en silencio.".into();
+            return;
+        }
+        let g = (0.97 / pico).min(16.0);
+        self.edit_clip(id, |x| x.gain = g);
+        self.msg = format!("Clip normalizado ({:+.1} dB).", 20.0 * g.log10());
+    }
+
+    /// Quita el silencio del principio y del final del clip (umbral −45 dB).
+    pub(super) fn recortar_silencio(&mut self, id: u32) {
+        let Some(c) = self.p.audio_clip(id).cloned() else { return };
+        let Some(path) = media::resolve(&self.plat.data_dir, c.file()) else {
+            self.msg = "No se encuentra el audio del clip.".into();
+            return;
+        };
+        let Ok(b) = media::decode(&path) else {
+            self.msg = "No se pudo leer el audio.".into();
+            return;
+        };
+        let ss = self.p.step_secs() as f32;
+        let ratio = c.ratio(self.p.bpm);
+        let sr = b.sr as f32;
+        let ini = (c.off * sr) as usize;
+        let fin = (ini + (c.len as f32 * ss / ratio * sr) as usize).min(b.frames());
+        let umbral = 10f32.powf(-45.0 / 20.0);
+        let suena = |i: usize| {
+            let (l, r) = b.at(i);
+            l.abs().max(r.abs()) > umbral
+        };
+        let Some(primero) = (ini..fin).find(|&i| suena(i)) else {
+            self.msg = "El clip está en silencio.".into();
+            return;
+        };
+        let ultimo = (ini..fin).rev().find(|&i| suena(i)).unwrap_or(fin);
+        // pasos que se pueden quitar a cada lado (dejando un poquito de aire)
+        let aire = (0.03 * sr) as usize;
+        let quitar_ini = (primero.saturating_sub(aire).saturating_sub(ini)) as f32 / sr * ratio / ss;
+        let quitar_fin = (fin.saturating_sub(ultimo + aire)) as f32 / sr * ratio / ss;
+        let (qi, qf) = (quitar_ini.floor() as u32, quitar_fin.floor() as u32);
+        if qi + qf == 0 || qi + qf >= c.len {
+            self.msg = "No hay silencio que recortar.".into();
+            return;
+        }
+        self.snap();
+        if let Some(x) = self.p.audio_clips.iter_mut().find(|x| x.id == id) {
+            x.start += qi;
+            x.off += qi as f32 * ss / ratio;
+            x.len -= qi + qf;
+        }
+        self.cambios = true;
+        self.send();
+        self.msg = "Silencio recortado.".into();
     }
 
     fn split_clip(&mut self, id: u32, step: u32) {
@@ -2188,12 +2427,21 @@ impl StudioApp {
                     self.cmd(Cmd::Metronome(true));
                 }
                 self.song_mode = true;
+                // precuenta: compases de metrónomo antes de que arranque (no en bucle)
+                let precuenta = if looped { 0 } else { self.settings.precuenta.min(2) as u32 * STEPS_PER_BAR };
+                if precuenta > 0 {
+                    self.cmd(Cmd::Precuenta(precuenta));
+                }
                 self.play(from);
+                let precuenta_s = precuenta as f32 * self.p.step_secs() as f32;
+                if precuenta > 0 {
+                    self.msg = format!("Precuenta de {} compás(es)…", precuenta / STEPS_PER_BAR);
+                }
                 // carril libre desde donde empieza hasta el final de la canción
                 let fin = (self.p.song_bars() * STEPS_PER_BAR).max(from + 64);
                 let track = self.p.audio_clips.iter().find(|c| c.ch == ch && c.start >= from).map(|c| c.track).unwrap_or_else(|| self.free_track(from, fin - from));
                 self.ensure_tracks(track + 1);
-                self.rec_track = Some(TrackRec { r, ch, from, region, looped, started: Instant::now(), track });
+                self.rec_track = Some(TrackRec { r, ch, from, region, looped, started: Instant::now(), track, precuenta_s });
                 // después de guardar la grabación: así la escucha usa este micrófono y no abre otro
                 self.escucha_sync();
                 self.msg = if looped { "Grabando en bucle: cada vuelta es una toma. Espacio o Detener para terminar.".into() } else if region.is_some() { "Grabando con punch: solo se guarda la región marcada.".into() } else { "Grabando en la pista de audio… Espacio o Detener para terminar.".into() };
@@ -2213,7 +2461,8 @@ impl StudioApp {
         drop(tr.r);
         let ss = self.p.step_secs() as f32;
         let lat = ((self.settings.latency_ms / 1000.0) * sr) as usize;
-        let data: Vec<f32> = data.into_iter().skip(lat).collect();
+        // se quita la latencia y el tramo de la precuenta
+        let data: Vec<f32> = data.into_iter().skip(lat + (tr.precuenta_s * sr) as usize).collect();
         let total_steps = data.len() as f32 / sr / ss;
         let mut pieces: Vec<(u32, u32, Vec<f32>)> = vec![]; // inicio, largo (pasos), audio
         match tr.region {
@@ -2459,7 +2708,7 @@ impl StudioApp {
             }
             this.send();
         };
-        ui.menu_button("Herramientas", |ui| {
+        ui.menu_button("Herramientas", |ui| desplazable(ui, |ui| {
             ui.label(RichText::new("TRANSPONER").small().color(DIM));
             ui.horizontal(|ui| {
                 for (n, d) in [("-12", -12i32), ("-1", -1), ("+1", 1), ("+12", 12)] {
@@ -2545,12 +2794,12 @@ impl StudioApp {
                     self.msg = format!("Progresión «{name}» en {}.", self.p.key_label());
                 }
             }
-        });
+        }));
         // arpegiador del canal
         let Some(c) = self.p.channel(ch).cloned() else { return };
         let mut arp = c.arp;
         let before = arp;
-        ui.menu_button(if arp.on { "Arpegiador (activo)" } else { "Arpegiador" }, |ui| {
+        ui.menu_button(if arp.on { "Arpegiador (activo)" } else { "Arpegiador" }, |ui| desplazable(ui, |ui| {
             ui.checkbox(&mut arp.on, "Encendido");
             egui::ComboBox::from_id_salt("arpm").selected_text(ARP_MODES[arp.mode as usize % ARP_MODES.len()]).show_ui(ui, |ui| {
                 for (i, n) in ARP_MODES.iter().enumerate() {
@@ -2571,7 +2820,7 @@ impl StudioApp {
             });
             ui.add(egui::Slider::new(&mut arp.gate, 0.1..=1.0).text("Duración"));
             ui.label(RichText::new("Escribe acordes largos: el arpegiador los recorre al tocar.").small().color(DIM));
-        });
+        }));
         if arp != before {
             self.snap();
             if let Some(cm) = self.p.channel_mut(ch) {
@@ -2612,6 +2861,75 @@ impl StudioApp {
         if l[1] <= -69.0 { "— LUFS".into() } else { format!("{:.1} LUFS", l[1]) }
     }
 
+    /// Osciloscopio (forma de onda) y vectorscopio (imagen estéreo) del master.
+    fn visualizadores(&mut self, ui: &mut Ui) {
+        let datos = match self.status.estereo.lock() {
+            Ok(s) => s.clone(),
+            Err(_) => return,
+        };
+        if self.playing() {
+            ui.ctx().request_repaint();
+        }
+        let n = datos.len() / 2;
+        let lado = 170.0;
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            // ---------- osciloscopio
+            ui.vertical(|ui| {
+                ui.label(RichText::new("Osciloscopio").small().color(DIM));
+                let (r, _) = ui.allocate_exact_size(Vec2::new(lado * 1.3, lado), Sense::hover());
+                let p = ui.painter_at(r);
+                p.rect_filled(r, 8, Color32::from_gray(12));
+                p.hline(r.x_range(), r.center().y, Stroke::new(1.0, Color32::from_gray(35)));
+                // se busca un cruce por cero para que la onda quede quieta
+                let ventana = 512.min(n);
+                let mut ini = n - ventana;
+                for i in (1..n - ventana).rev().take(800) {
+                    let (a, b) = (datos[(i - 1) * 2] + datos[(i - 1) * 2 + 1], datos[i * 2] + datos[i * 2 + 1]);
+                    if a < 0.0 && b >= 0.0 {
+                        ini = i;
+                        break;
+                    }
+                }
+                let pts: Vec<Pos2> = (0..ventana)
+                    .map(|k| {
+                        let i = ini + k;
+                        let v = ((datos[i * 2] + datos[i * 2 + 1]) * 0.5).clamp(-1.0, 1.0);
+                        Pos2::new(r.left() + k as f32 / ventana as f32 * r.width(), r.center().y - v * r.height() * 0.48)
+                    })
+                    .collect();
+                p.add(egui::Shape::line(pts, Stroke::new(1.3, ACCENT)));
+            });
+            // ---------- vectorscopio
+            ui.vertical(|ui| {
+                ui.label(RichText::new("Vectorscopio (estéreo)").small().color(DIM));
+                let (r, _) = ui.allocate_exact_size(Vec2::splat(lado), Sense::hover());
+                let p = ui.painter_at(r);
+                p.rect_filled(r, 8, Color32::from_gray(12));
+                let c = r.center();
+                let s = lado * 0.45;
+                p.line_segment([c - Vec2::new(0.0, s), c + Vec2::new(0.0, s)], Stroke::new(1.0, Color32::from_gray(35)));
+                p.line_segment([c - Vec2::new(s * 0.7, s * 0.7), c + Vec2::new(s * 0.7, s * 0.7)], Stroke::new(1.0, Color32::from_gray(28)));
+                p.line_segment([c - Vec2::new(s * 0.7, -s * 0.7), c + Vec2::new(s * 0.7, -s * 0.7)], Stroke::new(1.0, Color32::from_gray(28)));
+                let mut corr = (0f32, 0f32, 0f32);
+                let col = Color32::from_rgba_unmultiplied(230, 230, 235, 70);
+                for i in (0..n).step_by(2) {
+                    let (l, rr) = (datos[i * 2], datos[i * 2 + 1]);
+                    corr.0 += l * rr;
+                    corr.1 += l * l;
+                    corr.2 += rr * rr;
+                    // centro (mono) arriba-abajo, lados izquierda-derecha
+                    let x = ((rr - l) * 0.707).clamp(-1.0, 1.0);
+                    let y = ((l + rr) * 0.707).clamp(-1.0, 1.0);
+                    p.circle_filled(c + Vec2::new(x * s, -y * s), 0.9, col);
+                }
+                let k = if corr.1 * corr.2 > 1e-9 { corr.0 / (corr.1 * corr.2).sqrt() } else { 1.0 };
+                ui.label(RichText::new(format!("Correlación {k:+.2}")).small().color(if k < 0.0 { RED } else { DIM }))
+                    .on_hover_text("+1 = mono, 0 = muy abierto, negativo = se cancela en mono (cuidado)");
+            });
+        });
+    }
+
     pub(super) fn master_window(&mut self, ui: &mut Ui) {
         let l = self.lufs_hold;
         let tp = 20.0 * self.tpeak_hold.max(1e-6).log10();
@@ -2634,83 +2952,13 @@ impl StudioApp {
         let tgt = MASTER_TARGETS[self.master_target].1;
         p.vline(fx(tgt), r.y_range(), Stroke::new(2.0, Color32::WHITE));
         ui.label(RichText::new("Reproduce la canción en SONG para medir. La línea blanca es el objetivo.").small().color(DIM));
+        self.visualizadores(ui);
         ui.separator();
-        ui.label(RichText::new("MASTERIZAR CON UN CLIC").strong());
-        // estilos como tarjetas
         ui.horizontal(|ui| {
-            for (i, (n, d, _, _)) in MASTER_ESTILOS.iter().enumerate() {
-                let sel = self.master_estilo == i;
-                let (r, resp) = ui.allocate_exact_size(Vec2::new(86.0, 40.0), Sense::click());
-                let t = ui.ctx().animate_bool_with_time(resp.id, sel, 0.18);
-                let p = ui.painter();
-                let base = if resp.hovered() { Color32::from_gray(39) } else { Color32::from_gray(29) };
-                p.rect(r, 8, lerp_col(base, Color32::WHITE, t), Stroke::new(1.0, lerp_col(LINE, Color32::WHITE, t)), StrokeKind::Inside);
-                p.text(r.center(), Align2::CENTER_CENTER, *n, FontId::proportional(13.0), lerp_col(Color32::WHITE, Color32::from_gray(17), t));
-                if resp.on_hover_text(*d).clicked() {
-                    self.master_estilo = i;
-                }
+            if boton_metal(ui, "Abrir el masterizado", Vec2::new(200.0, 34.0)).on_hover_text("Estilos, intensidad, ecualizador y referencia (también desde la píldora de la barra de arriba)").clicked() {
+                self.mast_panel = true;
             }
         });
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Intensidad").small().color(DIM));
-            for (i, (n, l, _)) in MASTER_INT.iter().enumerate() {
-                if ui.add(egui::Button::selectable(self.master_int == i, *n)).on_hover_text(format!("Sonoridad final: {l:.0} LUFS")).clicked() {
-                    self.master_int = i;
-                }
-            }
-        });
-        ui.horizontal(|ui| {
-            for (k, n) in ["Graves", "Medios", "Agudos"].iter().enumerate() {
-                ui.label(RichText::new(*n).small().color(DIM));
-                ui.add(egui::DragValue::new(&mut self.master_eq3[k]).range(-6.0..=6.0).speed(0.05).suffix(" dB").fixed_decimals(1));
-            }
-        });
-        // canción de referencia
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            match &self.master_ref {
-                Some((n, l, _)) => {
-                    ui.label(RichText::new(format!("Referencia: {n} ({l:.1} LUFS)")).small().color(ACCENT2));
-                    if ui.small_button("Quitar").clicked() {
-                        self.master_ref = None;
-                    }
-                }
-                None => {
-                    if ui.button("Igualar a una canción de referencia…").on_hover_text("Elige una canción que te guste: se copia su volumen y su balance de graves, medios y agudos").clicked() {
-                        if let Some(path) = self.pick_audio() {
-                            match media::decode(&path) {
-                                Ok(b) => {
-                                    let st: Vec<f32> = if b.ch == 1 { b.data.iter().flat_map(|v| [*v, *v]).collect() } else { b.data.clone() };
-                                    let (l, _) = crate::loudness::measure(&st, b.sr);
-                                    let bal = balance_3(&st, b.sr);
-                                    let n = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-                                    self.master_ref = Some((n, l, bal));
-                                }
-                                Err(e) => self.msg = format!("No se pudo leer la referencia: {e}"),
-                            }
-                        }
-                    }
-                }
-            }
-        });
-        let busy = self.master_job.is_some();
-        if busy {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label("Analizando la canción…");
-            });
-        } else if boton_metal(ui, "Masterizar canción", Vec2::new(220.0, 36.0)).clicked() {
-            self.start_mastering();
-        }
-        ui.label(RichText::new("Ajusta NN EQ, NN Dynamics y el limitador del master sin distorsión. Se puede deshacer.").small().color(DIM));
-        if ui.button("Quitar mastering (valores neutros)").clicked() {
-            self.snap();
-            self.p.master_eq = default_eq();
-            self.p.master_comp = CompP::master();
-            self.p.limiter = LimP::default();
-            self.send();
-        }
     }
 
     pub(super) fn start_mastering(&mut self) {
@@ -2721,8 +2969,9 @@ impl StudioApp {
         let (tx, rx) = mpsc::channel();
         let mut p = self.p.clone();
         let bank = self.bank();
-        let (estilo, int, eq3, referencia) = (self.master_estilo, self.master_int, self.master_eq3, self.master_ref.clone());
-        let target = referencia.as_ref().map(|r| r.1.clamp(-20.0, -7.0)).unwrap_or(MASTER_INT[int.min(2)].1);
+        let eq3 = if self.master_eq_on { self.master_eq3 } else { [0.0; 3] };
+        let (estilo, int, referencia) = (self.master_estilo, self.master_int, self.master_ref.clone());
+        let target = referencia.as_ref().map(|r| r.1.clamp(-20.0, -7.0)).unwrap_or(int_valores(int).0);
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
             let (pr, ca) = (AtomicU32::new(0), AtomicBool::new(false));
@@ -2802,7 +3051,7 @@ impl StudioApp {
 
     pub(super) fn settings_window(&mut self, ui: &mut Ui) {
         let antes = format!("{:?}", self.settings);
-        let secciones = ["General", "Audio", "Grabación", "MIDI", "Exportar", "Pantalla", "Plugins"];
+        let secciones = ["General", "Audio", "Grabación", "MIDI", "Exportar", "Pantalla", "Plugins", "Metrónomo"];
         let mut reiniciar_audio = false;
         ui.horizontal_top(|ui| {
             // columna de secciones
@@ -2873,10 +3122,15 @@ impl StudioApp {
                     }
                     1 => {
                         titulo(ui, "Salida (parlantes o audífonos)");
-                        let salidas = audio::outputs();
-                        let actual = if self.settings.salida.is_empty() { "La de Windows".to_string() } else { self.settings.salida.clone() };
+                        if self.entradas_t.is_none_or(|t| t.elapsed() > Duration::from_secs(3)) {
+                            self.entradas = audio::inputs();
+                            self.salidas = audio::outputs();
+                            self.entradas_t = Some(Instant::now());
+                        }
+                        let salidas = self.salidas.clone();
+                        let actual = if self.settings.salida.is_empty() { audio::PREDETERMINADO_SALIDA.to_string() } else { self.settings.salida.clone() };
                         egui::ComboBox::from_id_salt("salida").width(380.0).selected_text(actual).show_ui(ui, |ui| {
-                            if ui.selectable_label(self.settings.salida.is_empty(), "La de Windows").clicked() {
+                            if ui.selectable_label(self.settings.salida.is_empty(), audio::PREDETERMINADO_SALIDA).clicked() {
                                 self.settings.salida.clear();
                                 reiniciar_audio = true;
                             }
@@ -2893,11 +3147,11 @@ impl StudioApp {
                             ui.label(RichText::new(format!("Sin audio: {e}")).color(RED));
                         }
                         titulo(ui, "Entrada (micrófono)");
-                        let entradas = audio::inputs();
-                        let actual = if self.settings.entrada.is_empty() { "La de Windows".to_string() } else { self.settings.entrada.clone() };
+                        let entradas = self.entradas.clone();
+                        let actual = if self.settings.entrada.is_empty() { audio::PREDETERMINADO_ENTRADA.to_string() } else { self.settings.entrada.clone() };
                         let antes_e = self.settings.entrada.clone();
                         egui::ComboBox::from_id_salt("entrada").width(380.0).selected_text(actual).show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.settings.entrada, String::new(), "La de Windows");
+                            ui.selectable_value(&mut self.settings.entrada, String::new(), audio::PREDETERMINADO_ENTRADA);
                             for n in &entradas {
                                 ui.selectable_value(&mut self.settings.entrada, n.clone(), n);
                             }
@@ -2928,6 +3182,37 @@ impl StudioApp {
                         if ui.button("Reiniciar el audio").clicked() {
                             reiniciar_audio = true;
                         }
+                    }
+                    7 => {
+                        titulo(ui, "Metrónomo");
+                        ui.horizontal(|ui| {
+                            ui.label("Sonido");
+                            for (k, n) in ["Clásico", "Madera", "Electrónico", "Suave"].iter().enumerate() {
+                                if ui.add(egui::Button::selectable(self.settings.metro_sonido as usize == k, *n)).clicked() {
+                                    self.settings.metro_sonido = k as u8;
+                                }
+                            }
+                        });
+                        ui.add(egui::Slider::new(&mut self.settings.metro_vol, 0.0..=1.5).custom_formatter(|v, _| format!("{:.0} %", v * 100.0)).text("Volumen"));
+                        ui.horizontal(|ui| {
+                            ui.label("Golpes");
+                            for (k, n) in ["Cada tiempo (negras)", "Cada medio tiempo (corcheas)"].iter().enumerate() {
+                                if ui.add(egui::Button::selectable(self.settings.metro_sub as usize == k, *n)).clicked() {
+                                    self.settings.metro_sub = k as u8;
+                                }
+                            }
+                        });
+                        ui.checkbox(&mut self.settings.metro_acento, "Marcar más fuerte el primer tiempo de cada compás");
+                        ui.checkbox(&mut self.settings.metro_grabar, "Prender el metrónomo mientras se graba");
+                        ui.horizontal(|ui| {
+                            ui.label("Precuenta antes de grabar");
+                            for (k, n) in ["No", "1 compás", "2 compases"].iter().enumerate() {
+                                if ui.add(egui::Button::selectable(self.settings.precuenta as usize == k, *n)).clicked() {
+                                    self.settings.precuenta = k as u8;
+                                }
+                            }
+                        });
+                        nota(ui, "El metrónomo se prende y apaga con su botón en la barra de arriba (o la tecla M). La flechita junto a ese botón abre un menú rápido con tempo, sonido, volumen y precuenta.");
                     }
                     2 => {
                         titulo(ui, "Grabación");
@@ -3075,8 +3360,8 @@ impl StudioApp {
                 Ok(a)
             }
             Err(e) => {
-                // si el dispositivo elegido falla, se vuelve al de Windows
-                self.msg = format!("No se pudo abrir el audio ({e}). Se usa el de Windows.");
+                // si el dispositivo elegido falla (se desconectó), se vuelve al predeterminado
+                self.msg = format!("No se pudo abrir «{}» ({e}). Se usa la salida predeterminada.", self.settings.salida);
                 audio::start(self.p.clone(), self.status.clone(), "", 0).map_err(|_| e)
             }
         };
@@ -3137,7 +3422,7 @@ impl StudioApp {
     }
 
     pub(super) fn file_menu_extra(&mut self, ui: &mut Ui) {
-        ui.menu_button("Nuevo desde plantilla", |ui| {
+        ui.menu_button("Nuevo desde plantilla", |ui| desplazable(ui, |ui| {
             for (i, n) in templates::TEMPLATES.iter().enumerate() {
                 if ui.button(*n).clicked() {
                     ui.close();
@@ -3156,12 +3441,12 @@ impl StudioApp {
                     }
                 }
             }
-        });
+        }));
         if ui.button("Guardar como plantilla").clicked() {
             ui.close();
             self.save_template();
         }
-        ui.menu_button("Versiones anteriores", |ui| {
+        ui.menu_button("Versiones anteriores", |ui| desplazable(ui, |ui| {
             let v = self.list_json("versiones");
             if v.is_empty() {
                 ui.label("Todavía no hay versiones guardadas.");
@@ -3176,15 +3461,16 @@ impl StudioApp {
                     self.open_path(p);
                 }
             }
-        });
+        }));
         ui.separator();
         if ui.button("Importar audio a la playlist…").clicked() {
             ui.close();
-            if let Some(p) = self.pick_audio() {
+            // en el teléfono se abre el selector de archivos del teléfono; en la PC, el de Windows
+            if self.plat.mobile {
+                self.elegir_audio = Some(None);
+            } else if let Some(p) = self.pick_audio() {
                 let t = self.free_track(self.play_from, 16);
                 self.import_to_playlist(&p, t, self.play_from);
-            } else if self.plat.mobile {
-                self.left_tab = 1;
             }
         }
         if ui.button("Importar sample al rack…").clicked() {
@@ -3207,7 +3493,7 @@ impl StudioApp {
             ui.close();
             self.start_export(Format::Stems);
         }
-        ui.menu_button("Aplicar kit de batería", |ui| {
+        ui.menu_button("Aplicar kit de batería", |ui| desplazable(ui, |ui| {
             for (i, n) in templates::KITS.iter().enumerate() {
                 if ui.button(*n).clicked() {
                     ui.close();
@@ -3217,7 +3503,7 @@ impl StudioApp {
                     self.send();
                 }
             }
-        });
+        }));
         ui.separator();
         if ui.button("Ver tutorial").clicked() {
             ui.close();
@@ -3251,7 +3537,7 @@ impl StudioApp {
 
     pub(super) fn channel_presets(&mut self, ui: &mut Ui, id: u32) {
         let Some(c) = self.p.channel(id).cloned() else { return };
-        ui.menu_button("Presets", |ui| {
+        ui.menu_button("Presets", |ui| desplazable(ui, |ui| {
             if ui.button("Guardar preset del canal").clicked() {
                 ui.close();
                 let path = self.user_dir("presets").join(format!("{} - {}.json", c.inst.name(), export::safe_name(&c.name)));
@@ -3312,7 +3598,7 @@ impl StudioApp {
                     }
                 }
             }
-        });
+        }));
     }
 
     /// Todo el audio que necesita una exportación o un análisis.

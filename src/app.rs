@@ -22,6 +22,12 @@ mod plugin_ui;
 mod tutorial;
 #[path = "rec_view.rs"]
 mod rec_view;
+#[path = "masterizado_view.rs"]
+mod masterizado_view;
+#[path = "pads_view.rs"]
+mod pads_view;
+#[path = "efectos_view.rs"]
+mod efectos_view;
 #[path = "retune_view.rs"]
 mod retune_view;
 use retune_view::Retune;
@@ -40,6 +46,7 @@ enum View {
     Rack,
     Roll,
     Mixer,
+    Pads,
 }
 
 // Paleta monocroma «metal líquido»: negro profundo, grises neutros y plata.
@@ -170,7 +177,13 @@ pub struct StudioApp {
     /// mastering estilo BandLab: estilo, intensidad (0 ligero, 1 normal, 2 pesado), graves/medios/agudos
     /// y canción de referencia (nombre, sonoridad, balance de graves/medios/agudos)
     master_estilo: usize,
-    master_int: usize,
+    master_int: f32,
+    master_eq_on: bool,
+    /// panel «Masterizando» abierto y escuchar sin master
+    mast_panel: bool,
+    sin_master: bool,
+    /// en el teléfono: cuál de los dos paneles se abrió último (el otro se cierra)
+    mic_antes_que_mast: bool,
     master_eq3: [f32; 3],
     master_ref: Option<(String, f32, [f32; 3])>,
     scale_snap: bool,
@@ -197,6 +210,24 @@ pub struct StudioApp {
     trazo: std::collections::VecDeque<(f32, f32)>,
     /// ancho de un compás en la playlist (zoom)
     pl_bw: f32,
+    /// toques de «Tocar» para sacar el tempo
+    toques: Vec<f64>,
+    /// pads de batería y acordes
+    pads: pads_view::Pads,
+    /// permisos de Android ya pedidos; lista de micrófonos (y cuándo se leyó)
+    permisos_pedidos: bool,
+    /// cuándo se abrió la app
+    inicio: Instant,
+    /// última vez que se reconectó el audio; lista de salidas (se lee junto con las entradas)
+    reconexion: Option<Instant>,
+    salidas: Vec<String>,
+    /// se pidió el permiso del micrófono y se espera la respuesta
+    mic_esperando: Option<Instant>,
+    entradas: Vec<String>,
+    entradas_t: Option<Instant>,
+    /// selector de audio del teléfono abierto (None dentro = lista de lugares)
+    elegir_audio: Option<Option<PathBuf>>,
+    elegir_cache: Option<(PathBuf, Vec<(String, PathBuf, bool)>)>,
     /// panel lateral de letras y notas
     letras_panel: bool,
     /// editor Retune abierto (y clip que se está analizando)
@@ -263,6 +294,7 @@ impl StudioApp {
         let sel_pat = p.patterns[0].id;
         let sel_ch = p.channels.iter().find(|c| c.inst.melodic()).unwrap_or(&p.channels[0]).id;
         let msg = match &audio_err {
+            None if plat.mobile => "Listo.".to_string(),
             None => "Listo. Espacio: reproducir · Enter: PAT/SONG · F5/F6/F7/F9: ventanas.".to_string(),
             Some(e) => format!("Sin audio: {e}"),
         };
@@ -339,7 +371,11 @@ impl StudioApp {
             master_job: None,
             master_target: 0,
             master_estilo: 0,
-            master_int: 1,
+            master_int: 1.0,
+            master_eq_on: false,
+            mast_panel: false,
+            mic_antes_que_mast: false,
+            sin_master: false,
             master_eq3: [0.0; 3],
             master_ref: None,
             scale_snap: false,
@@ -360,6 +396,17 @@ impl StudioApp {
             mic_panel: false,
             trazo: std::collections::VecDeque::with_capacity(400),
             pl_bw: 72.0,
+            permisos_pedidos: false,
+            pads: Default::default(),
+            toques: vec![],
+            inicio: Instant::now(),
+            reconexion: None,
+            salidas: vec![],
+            mic_esperando: None,
+            entradas: vec![],
+            entradas_t: None,
+            elegir_audio: None,
+            elegir_cache: None,
             letras_panel: false,
             retune: None,
             retune_cargando: None,
@@ -371,7 +418,7 @@ impl StudioApp {
             cerrar_ok: false,
             titulo: String::new(),
             last_auto: Instant::now(),
-            zoom_puesto: 1.0,
+            zoom_puesto: -1.0,
             ajuste_sec: 0,
             export_dir_inicial,
         };
@@ -880,6 +927,9 @@ impl StudioApp {
         if f9 {
             self.view = View::Mixer;
         }
+        if ctx.input(|i| i.key_pressed(Key::F8)) {
+            self.view = View::Pads;
+        }
         if typing {
             return;
         }
@@ -903,25 +953,27 @@ impl StudioApp {
 
     // ---------- barra superior ----------
     fn top_bar(&mut self, ui: &mut Ui, compact: bool) {
-        if compact {
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                self.barra_izq(ui, true, 0.0);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| self.barra_der(ui, false));
-            });
-            return;
-        }
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.spacing_mut().item_spacing.x = if compact { 6.0 } else { 8.0 };
             let ancho = ui.available_width();
             // la derecha tiene su lugar fijo; la izquierda usa lo que queda y nunca se monta encima
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                self.barra_der(ui, ancho > 1800.0);
-                ui.add_space(14.0);
+                self.barra_der(ui, !compact && ancho > 1800.0, compact);
+                ui.add_space(if compact { 6.0 } else { 14.0 });
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     let caja = ui.max_rect();
                     ui.set_clip_rect(caja.intersect(ui.clip_rect()));
-                    self.barra_izq(ui, false, ancho);
+                    if compact {
+                        // en el teléfono todo en una fila: se desliza con el dedo si no entra
+                        egui::ScrollArea::horizontal()
+                            .id_salt("barra_izq")
+                            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| self.barra_izq(ui, true, 0.0));
+                            });
+                    } else {
+                        self.barra_izq(ui, false, ancho);
+                    }
                 });
             });
         });
@@ -931,14 +983,18 @@ impl StudioApp {
     fn barra_izq(&mut self, ui: &mut Ui, compact: bool, ancho: f32) {
         // lugar que de verdad queda para esta parte (lo de la derecha ya está puesto)
         let _ = ancho;
-        let libre = if compact { f32::INFINITY } else { ui.available_width() };
+        let libre = if compact { 0.0 } else { ui.available_width() };
         // lo básico (transporte, tempo, swing y nombre) ocupa unos 1040 px; el título y los rótulos solo si caben
         let extra = libre - 1040.0;
-        // el nombre de la app siempre se ve; si falta lugar se achica el cuadro del nombre del proyecto
-        let con_titulo = true;
-        let con_rotulos = extra > 235.0;
+        // el nombre de la app siempre se ve en la PC (en el teléfono, solo el logo)
+        let con_titulo = !compact;
+        let con_rotulos = !compact && extra > 235.0;
         if let Some(t) = &self.logo {
             ui.add(egui::Image::new(t).fit_to_exact_size(Vec2::splat(30.0))).on_hover_text(concat!("NoName Studio ", env!("CARGO_PKG_VERSION")));
+        }
+        // en el teléfono el nombre del proyecto va al principio, siempre a la vista
+        if compact {
+            self.campo_nombre(ui, 120.0);
         }
         if con_titulo {
             ui.label(RichText::new("NoName Studio").strong().size(15.0).color(Color32::WHITE));
@@ -981,9 +1037,24 @@ impl StudioApp {
         if r.on_hover_text("Canción completa (playlist)").clicked() {
             self.set_song_mode(true);
         }
-        if icon_button(ui, Ic::Metro, Vec2::new(36.0, 28.0), self.metro, None).on_hover_text("Metrónomo (M)").clicked() {
+        // metrónomo: el botón lo prende y apaga; la flechita abre sus ajustes
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let rm = icon_button(ui, Ic::Metro, Vec2::new(34.0, 28.0), self.metro, None).on_hover_text("Metrónomo (M)");
+        if rm.clicked() {
             self.metro = !self.metro;
             self.cmd(Cmd::Metronome(self.metro));
+        }
+        let (rr, rf) = ui.allocate_exact_size(Vec2::new(20.0, 28.0), Sense::click());
+        let abierto = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&rf));
+        let cf = if rf.hovered() || abierto { Color32::WHITE } else { DIM };
+        let c = rr.center();
+        let (a1, a2) = if abierto { (-3.0, 2.0) } else { (2.0, -3.0) };
+        ui.painter().add(egui::Shape::line(vec![c + Vec2::new(-4.5, -a1 - 0.5), c + Vec2::new(0.0, -a2 - 0.5), c + Vec2::new(4.5, -a1 - 0.5)], Stroke::new(1.6, cf)));
+        let rf = rf.on_hover_text("Ajustes del metrónomo");
+        ui.spacing_mut().item_spacing.x = 6.0;
+        egui::Popup::menu(&rf).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| self.menu_metronomo(ui));
+        if rm.secondary_clicked() || rm.long_touched() {
+            egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&rf));
         }
         // LCD
         let s = if playing { self.status.pos().max(0.0) as u64 } else { 0 };
@@ -1017,13 +1088,18 @@ impl StudioApp {
             self.p.swing8 = !self.p.swing8;
             self.send();
         }
-        let mut name = self.p.name.clone();
-        // el nombre usa el espacio que sobra (sin meterse debajo de lo de la derecha)
-        let w_nombre = if compact { 110.0 } else { (ui.available_width() - 6.0).min(200.0) };
-        if w_nombre < 60.0 {
-            return;
+        if !compact {
+            let w = (ui.available_width() - 6.0).min(200.0);
+            if w >= 60.0 {
+                self.campo_nombre(ui, w);
+            }
         }
-        let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(w_nombre).hint_text("Nombre del proyecto"));
+    }
+
+    /// Cuadro con el nombre del proyecto.
+    fn campo_nombre(&mut self, ui: &mut Ui, ancho: f32) {
+        let mut name = self.p.name.clone();
+        let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(ancho).hint_text("Nombre del proyecto"));
         if r.changed() {
             if r.gained_focus() || !self.hist.last().is_some_and(|h| h.name != self.p.name) {
                 self.snap();
@@ -1034,7 +1110,142 @@ impl StudioApp {
     }
 
     /// Barra de arriba, derecha (de derecha a izquierda): Exportar, sonoridad, CPU, ajustes, Archivo y deshacer.
-    fn barra_der(&mut self, ui: &mut Ui, cpu: bool) {
+    /// Menú del metrónomo (flechita junto a su botón): tempo con «Tocar», sonido, volumen y precuenta.
+    fn menu_metronomo(&mut self, ui: &mut Ui) {
+        ui.set_width(270.0);
+        let mut guardar = false;
+        let titulo = |ui: &mut Ui, t: &str| {
+            ui.add_space(4.0);
+            ui.label(RichText::new(t).strong().size(15.0));
+            ui.add_space(2.0);
+        };
+        // ---------- tempo
+        titulo(ui, "Tempo");
+        Frame::new().fill(PANEL2).corner_radius(10).inner_margin(Margin::symmetric(8, 6)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let ancho = ui.available_width();
+                let lado = Vec2::new(44.0, 44.0);
+                if ui.add(egui::Button::new(RichText::new("−").size(18.0)).frame(false).min_size(lado)).clicked() {
+                    self.snap();
+                    self.p.bpm = (self.p.bpm.round() - 1.0).max(50.0);
+                    self.send();
+                }
+                // centro: el número y «Tocar» (toca al ritmo para sacar el tempo)
+                let (r, resp) = ui.allocate_exact_size(Vec2::new(ancho - lado.x * 2.0 - 16.0, 44.0), Sense::click());
+                let t = ui.input(|i| i.time);
+                if resp.clicked() {
+                    if self.toques.last().is_some_and(|u| t - u > 2.0) {
+                        self.toques.clear();
+                    }
+                    self.toques.push(t);
+                    if self.toques.len() > 6 {
+                        self.toques.remove(0);
+                    }
+                    if self.toques.len() >= 3 {
+                        let n = self.toques.len();
+                        let prom = (self.toques[n - 1] - self.toques[0]) / (n - 1) as f64;
+                        let bpm = (60.0 / prom).round().clamp(50.0, 200.0) as f32;
+                        if bpm != self.p.bpm {
+                            self.p.bpm = bpm;
+                            self.cambios = true;
+                            self.send();
+                        }
+                    }
+                }
+                let brillo = ui.ctx().animate_bool_with_time(resp.id.with("toque"), resp.is_pointer_button_down_on(), 0.1);
+                let p = ui.painter();
+                if resp.hovered() || brillo > 0.0 {
+                    p.rect_filled(r, 8, Color32::from_white_alpha((10.0 + 30.0 * brillo) as u8));
+                }
+                p.text(r.center() - Vec2::new(0.0, 7.0), Align2::CENTER_CENTER, format!("{:.0}", self.p.bpm), FontId::proportional(20.0), Color32::WHITE);
+                let pista = if self.toques.len() == 1 || self.toques.len() == 2 { "sigue tocando…" } else { "Tocar" };
+                p.text(r.center() + Vec2::new(0.0, 13.0), Align2::CENTER_CENTER, pista, FontId::proportional(11.0), DIM);
+                resp.on_hover_text("Toca aquí al ritmo de la canción (3 veces o más) y el tempo se ajusta solo");
+                if ui.add(egui::Button::new(RichText::new("+").size(18.0)).frame(false).min_size(lado)).clicked() {
+                    self.snap();
+                    self.p.bpm = (self.p.bpm.round() + 1.0).min(200.0);
+                    self.send();
+                }
+            });
+        });
+        // ---------- sonido
+        titulo(ui, "Sonido del metrónomo");
+        ui.horizontal(|ui| {
+            const SONIDOS: [&str; 4] = ["Clásico", "Madera", "Electrónico", "Suave"];
+            let actual = SONIDOS[(self.settings.metro_sonido as usize).min(3)];
+            egui::ComboBox::from_id_salt("metro_sonido").width(200.0).selected_text(actual).show_ui(ui, |ui| {
+                for (k, n) in SONIDOS.iter().enumerate() {
+                    if ui.selectable_label(self.settings.metro_sonido as usize == k, *n).clicked() {
+                        self.settings.metro_sonido = k as u8;
+                        self.status.metro_sonido.store(k as u32, Ordering::Relaxed);
+                        self.cmd(Cmd::ClicPrueba);
+                        guardar = true;
+                    }
+                }
+            });
+            if icon_button(ui, Ic::Play, Vec2::new(30.0, 30.0), false, None).on_hover_text("Escuchar").clicked() {
+                self.cmd(Cmd::ClicPrueba);
+            }
+        });
+        // ---------- volumen (en dB)
+        titulo(ui, "Volumen del metrónomo");
+        ui.horizontal(|ui| {
+            ui.spacing_mut().slider_width = 170.0;
+            let mut v = self.settings.metro_vol;
+            let r = ui.add(egui::Slider::new(&mut v, 0.0..=1.5).show_value(false));
+            // doble clic: vuelve a 0 dB
+            if r.double_clicked() {
+                v = 1.0;
+            }
+            if v != self.settings.metro_vol {
+                self.settings.metro_vol = v;
+                guardar = true;
+            }
+            if r.drag_stopped() {
+                self.cmd(Cmd::ClicPrueba);
+            }
+            let db = 20.0 * self.settings.metro_vol.max(1e-4).log10();
+            ui.label(RichText::new(if self.settings.metro_vol < 0.01 { "−∞".to_string() } else { format!("{db:+.1} dB") }).monospace().small());
+        });
+        // ---------- precuenta
+        titulo(ui, "Precuenta al grabar");
+        Frame::new().fill(PANEL2).corner_radius(99).inner_margin(Margin::same(3)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let w = (ui.available_width() - 6.0) / 3.0;
+                for (k, n) in ["No", "1 compás", "2 compases"].iter().enumerate() {
+                    let sel = self.settings.precuenta as usize == k;
+                    let b = egui::Button::new(RichText::new(*n).color(if sel { Color32::from_gray(15) } else { DIM }))
+                        .fill(if sel { ACCENT } else { Color32::TRANSPARENT })
+                        .corner_radius(99)
+                        .min_size(Vec2::new(w, 30.0));
+                    if ui.add(b).clicked() {
+                        self.settings.precuenta = k as u8;
+                        guardar = true;
+                    }
+                }
+            });
+        });
+        // ---------- más
+        ui.add_space(6.0);
+        ui.collapsing("Más opciones", |ui| {
+            ui.horizontal(|ui| {
+                for (k, n) in ["Negras", "Corcheas"].iter().enumerate() {
+                    if ui.add(egui::Button::selectable(self.settings.metro_sub as usize == k, *n)).clicked() {
+                        self.settings.metro_sub = k as u8;
+                        guardar = true;
+                    }
+                }
+            });
+            guardar |= ui.checkbox(&mut self.settings.metro_acento, "Primer tiempo más fuerte").changed();
+            guardar |= ui.checkbox(&mut self.settings.metro_grabar, "Prender al grabar").changed();
+        });
+        if guardar {
+            self.save_settings();
+        }
+    }
+
+    fn barra_der(&mut self, ui: &mut Ui, cpu: bool, compact: bool) {
         let exporting = self.job.as_ref().map(|j| (j.progress.load(Ordering::Relaxed), j.fmt));
         match exporting {
             Some((pr, f)) => {
@@ -1045,23 +1256,23 @@ impl StudioApp {
             }
             None => {
                 // botón de metal líquido; el clic abre las opciones de exportar
-                let r = boton_metal(ui, "Exportar", Vec2::new(124.0, 34.0));
-                egui::Popup::menu(&r).show(|ui| self.export_menu(ui));
+                let r = boton_metal(ui, "Exportar", if compact { Vec2::new(96.0, 32.0) } else { Vec2::new(124.0, 34.0) });
+                egui::Popup::menu(&r).show(|ui| desplazable(ui, |ui| self.export_menu(ui)));
                 self.tut_mark("export", r.rect);
             }
         }
-        let lufs = self.lufs_text();
-        if ui.add(egui::Button::new(RichText::new(lufs).monospace().size(12.0).color(ACCENT2)).min_size(Vec2::new(84.0, 28.0))).on_hover_text("Sonoridad (corto plazo). Clic: NN Master y mastering con un clic").clicked() {
-            self.open_win(Win::Master);
-        }
-        // el uso de CPU solo se muestra si sobra lugar (o si está alto)
-        if cpu || self.load_hold > 0.8 {
-            ui.label(RichText::new(format!("CPU {:.0}%", self.load_hold * 100.0)).small().color(if self.load_hold > 0.8 { RED } else { DIM }));
+        // en el teléfono la sonoridad y el mastering están en el menú Archivo
+        self.pildora_master(ui, compact);
+        if !compact {
+            let lufs = self.lufs_text();
+            if ui.add(egui::Button::new(RichText::new(lufs).monospace().size(12.0).color(ACCENT2)).min_size(Vec2::new(84.0, 28.0))).on_hover_text("Sonoridad (corto plazo). Clic: NN Master y mastering con un clic").clicked() {
+                self.alternar_win(Win::Master);
+            }
         }
         if icon_button(ui, Ic::Gear, Vec2::new(34.0, 28.0), false, None).on_hover_text("Configuración").clicked() {
-            self.open_win(Win::Settings);
+            self.alternar_win(Win::Settings);
         }
-        ui.menu_button("Archivo", |ui| {
+        ui.menu_button("Archivo", |ui| desplazable(ui, |ui| {
             if ui.button("Nuevo proyecto").clicked() {
                 ui.close();
                 self.pedir(Pend::Nuevo(usize::MAX));
@@ -1083,6 +1294,10 @@ impl StudioApp {
                 ui.close();
                 self.start_export(Format::Wav);
             }
+            if ui.button("Sonoridad y mastering…").clicked() {
+                ui.close();
+                self.open_win(Win::Master);
+            }
             if ui.button("Cargar beat de ejemplo").clicked() {
                 ui.close();
                 self.snap();
@@ -1096,7 +1311,7 @@ impl StudioApp {
             self.file_menu_extra(ui);
             ui.separator();
             ui.label(RichText::new(format!("Exporta en: {}", self.plat.export_dir.display())).small().color(DIM));
-        });
+        }));
         if icon_button(ui, Ic::Undo, Vec2::new(36.0, 28.0), false, None).on_hover_text("Deshacer (Ctrl+Z)").clicked() {
             self.undo();
         }
@@ -1215,7 +1430,7 @@ impl StudioApp {
 
     // ---------- playlist ----------
     fn playlist(&mut self, ui: &mut Ui) {
-        egui::Panel::left("patlist").resizable(true).default_size(190.0).min_size(150.0).frame(Frame::new().fill(Color32::from_gray(26)).inner_margin(6)).show(ui, |ui| {
+        egui::Panel::left("patlist").resizable(true).default_size(if self.plat.mobile { 132.0 } else { 190.0 }).min_size(if self.plat.mobile { 110.0 } else { 150.0 }).frame(Frame::new().fill(Color32::from_gray(26)).inner_margin(6)).show(ui, |ui| {
             ui.horizontal(|ui| {
                 for (i, n) in [(0u8, "Patrones"), (1, "Navegador")] {
                     let r = ui.add(egui::Button::selectable(self.left_tab == i, n));
@@ -1224,6 +1439,11 @@ impl StudioApp {
                     }
                     if r.clicked() {
                         self.left_tab = i;
+                        // el navegador busca sonidos en el teléfono: ahí se pide el permiso de los archivos
+                        #[cfg(target_os = "android")]
+                        if i == 1 {
+                            audio::pedir_permisos(&["android.permission.READ_MEDIA_AUDIO", "android.permission.READ_EXTERNAL_STORAGE"]);
+                        }
                     }
                 }
             });
@@ -1331,14 +1551,14 @@ impl StudioApp {
             if r.on_hover_text(c.inst.name()).clicked() {
                 self.sel_ch = id;
                 if c.inst == Inst::Vocal {
-                    self.open_win(Win::Tune(id));
+                    self.alternar_win(Win::Tune(id));
                 } else if c.inst == Inst::Sampler {
-                    self.open_win(Win::Sampler(id));
+                    self.alternar_win(Win::Sampler(id));
                     self.preview(id, c.smp.root, 0.85);
                 } else if c.inst == Inst::Audio {
                     self.show_playlist = true;
                 } else if c.inst == Inst::Plugin {
-                    self.open_win(Win::Inserts(id));
+                    self.alternar_win(Win::Inserts(id));
                 } else if c.inst.is_drum() {
                     self.preview(id, 60, 0.85);
                 } else {
@@ -1394,7 +1614,7 @@ impl StudioApp {
                     }
                 }
                 if resp.clicked() {
-                    self.open_win(Win::Tune(id));
+                    self.alternar_win(Win::Tune(id));
                 }
             } else if c.inst == Inst::Audio {
                 let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 28.0), Sense::click());
@@ -1503,13 +1723,13 @@ impl StudioApp {
                 }
             }
             if c.inst == Inst::Synth && ui.button("NN Wave").on_hover_text("Editar el sintetizador").clicked() {
-                self.open_win(Win::Wave(id));
+                self.alternar_win(Win::Wave(id));
             }
             if c.inst == Inst::Sampler && ui.button("NN Sampler").on_hover_text("Sample, cortes, tono y tempo").clicked() {
-                self.open_win(Win::Sampler(id));
+                self.alternar_win(Win::Sampler(id));
             }
             if c.inst == Inst::Plugin && ui.button("Plugin").on_hover_text("Elegir y abrir el instrumento CLAP").clicked() {
-                self.open_win(Win::Inserts(id));
+                self.alternar_win(Win::Inserts(id));
             }
             if c.inst == Inst::Audio {
                 let recording = self.rec_track.as_ref().is_some_and(|r| r.ch == id);
@@ -1532,7 +1752,7 @@ impl StudioApp {
                     self.rec_start(id);
                 }
                 if ui.button("NN Tune").clicked() {
-                    self.open_win(Win::Tune(id));
+                    self.alternar_win(Win::Tune(id));
                 }
             }
             let open = self.open_set.contains(&id);
@@ -1963,6 +2183,7 @@ impl StudioApp {
         let mut touched = false;
         let mut started = false;
         let (mut open_eq, mut open_comp, mut open_fx) = (false, false, false);
+        let mut open_nn = false;
         Frame::new().fill(Color32::from_gray(25)).stroke(Stroke::new(1.0, Color32::from_gray(13))).corner_radius(6).inner_margin(6).show(ui, |ui| {
             ui.set_width(96.0);
             ui.vertical_centered(|ui| {
@@ -1983,11 +2204,15 @@ impl StudioApp {
                         open_fx = true;
                     }
                     let has_auto = self.p.autos.iter().any(|a| a.target.channel() == Some(id));
-                    ui.menu_button(RichText::new(if has_auto { "Auto*" } else { "Auto" }).size(10.5), |ui| {
+                    ui.menu_button(RichText::new(if has_auto { "Auto*" } else { "Auto" }).size(10.5), |ui| desplazable(ui, |ui| {
                         ui.label(RichText::new("CREAR AUTOMATIZACIÓN").small().color(DIM));
                         self.auto_menu(ui, id);
-                    });
+                    }));
                 });
+                let ne = c.efectos.len();
+                if ui.add(egui::Button::selectable(ne > 0, RichText::new(if ne > 0 { format!("Efectos ({ne})") } else { "Efectos".into() }).size(10.5)).min_size(Vec2::new(87.0, 18.0))).on_hover_text("Chorus, Phaser, Tape Delay, Bitcrusher, Spreader…").clicked() {
+                    open_nn = true;
+                }
                 let mut cutn = ((c.cut / 200.0).ln() / 100f32.ln()).clamp(0.0, 1.0);
                 egui::Grid::new(("knobs", id)).spacing(Vec2::new(4.0, 2.0)).show(ui, |ui| {
                     let r = knob(ui, &mut c.hi, -12.0, 12.0, 0.0, "Agudos", |v| format!("{:+.1}", v));
@@ -2048,14 +2273,17 @@ impl StudioApp {
                 });
             });
         });
+        if open_nn {
+            self.alternar_win(Win::Efectos(id));
+        }
         if open_eq {
-            self.open_win(Win::Eq(Some(id)));
+            self.alternar_win(Win::Eq(Some(id)));
         }
         if open_comp {
-            self.open_win(Win::Comp(id));
+            self.alternar_win(Win::Comp(id));
         }
         if open_fx {
-            self.open_win(Win::Inserts(id));
+            self.alternar_win(Win::Inserts(id));
         }
         if started {
             self.snap();
@@ -2075,9 +2303,9 @@ impl StudioApp {
             ui.vertical_centered(|ui| {
                 ui.label(RichText::new("Master").strong().size(12.0));
                 egui::Grid::new("mbtn").spacing(Vec2::new(3.0, 3.0)).show(ui, |ui| {
-                    for (i, (n, w)) in [("EQ", Win::Eq(None)), ("Dinám.", Win::Dyn), ("Verb", Win::Verb), ("Space", Win::Space), ("Master", Win::Master), ("FX", Win::Inserts(0))].into_iter().enumerate() {
+                    for (i, (n, w)) in [("EQ", Win::Eq(None)), ("Dinám.", Win::Dyn), ("Verb", Win::Verb), ("Space", Win::Space), ("Master", Win::Master), ("FX", Win::Inserts(0)), ("Efectos", Win::Efectos(0))].into_iter().enumerate() {
                         if ui.add(egui::Button::new(RichText::new(n).size(10.5)).min_size(Vec2::new(46.0, 18.0))).clicked() {
-                            self.open_win(w);
+                            self.alternar_win(w);
                         }
                         if i % 2 == 1 {
                             ui.end_row();
@@ -2122,9 +2350,9 @@ impl StudioApp {
         ui.horizontal(|ui| {
             ui.add_space(6.0);
             let tabs: &[(View, &str)] = if compact {
-                &[(View::Playlist, "Playlist"), (View::Rack, "Channel Rack"), (View::Roll, "Piano Roll"), (View::Mixer, "Mixer")]
+                &[(View::Playlist, "Playlist"), (View::Rack, "Channel Rack"), (View::Roll, "Piano Roll"), (View::Mixer, "Mixer"), (View::Pads, "Pads")]
             } else {
-                &[(View::Rack, "Channel Rack  F6"), (View::Roll, "Piano Roll  F7"), (View::Mixer, "Mixer  F9")]
+                &[(View::Rack, "Channel Rack  F6"), (View::Roll, "Piano Roll  F7"), (View::Mixer, "Mixer  F9"), (View::Pads, "Pads  F8")]
             };
             for &(v, n) in tabs {
                 let sel = self.view == v || (!compact && v == View::Rack && self.view == View::Playlist);
@@ -2155,13 +2383,14 @@ impl StudioApp {
             View::Rack => self.rack(ui),
             View::Roll => self.roll(ui),
             View::Mixer => self.mixer(ui),
+            View::Pads => self.pads(ui),
         }
     }
 
     fn status_bar(&mut self, ui: &mut Ui) {
+        let chica = self.plat.mobile || ui.available_width() < 1100.0;
         ui.horizontal(|ui| {
             ui.add_space(6.0);
-            ui.label(RichText::new(&self.msg).size(12.0).color(DIM));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(6.0);
                 // la marca siempre a la vista, en la esquina
@@ -2170,16 +2399,26 @@ impl StudioApp {
                     ui.add(egui::Image::new(t).fit_to_exact_size(Vec2::splat(15.0)));
                 }
                 ui.add_space(10.0);
-                if let Some(a) = &self.audio {
-                    ui.label(RichText::new(format!("Audio: {} · {} Hz", a.device, a.sr)).size(11.0).color(DIM));
+                // en pantallas chicas solo lo esencial
+                if !chica {
+                    if let Some(a) = &self.audio {
+                        ui.label(RichText::new(format!("Audio: {} · {} Hz", a.device, a.sr)).size(11.0).color(DIM));
+                    }
                 }
                 let bars = self.p.song_bars();
                 let secs = bars as f64 * 16.0 * self.p.step_secs();
-                ui.label(RichText::new(format!("Patrón: {} · Canción: {} compases ({}:{:02}) · {}", self.cur_pat().name, bars, secs as u32 / 60, secs as u32 % 60, self.p.key_label())).size(12.0).color(ACCENT2));
+                let info = if chica { format!("{}:{:02} · {}", secs as u32 / 60, secs as u32 % 60, self.p.key_label()) } else { format!("Patrón: {} · Canción: {} compases ({}:{:02}) · {}", self.cur_pat().name, bars, secs as u32 / 60, secs as u32 % 60, self.p.key_label()) };
+                ui.label(RichText::new(info).size(12.0).color(ACCENT2));
                 #[cfg(not(target_os = "android"))]
-                if let Some(m) = &self.midi_conn {
-                    ui.label(RichText::new(format!("MIDI: {}", m.name)).size(11.0).color(DIM));
+                if !chica {
+                    if let Some(m) = &self.midi_conn {
+                        ui.label(RichText::new(format!("MIDI: {}", m.name)).size(11.0).color(DIM));
+                    }
                 }
+                // el mensaje usa lo que queda y se corta con «…» si no entra
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    ui.add(egui::Label::new(RichText::new(&self.msg).size(12.0).color(DIM)).truncate());
+                });
             });
         });
     }
@@ -2244,6 +2483,55 @@ impl eframe::App for StudioApp {
             self.tpeak_hold = f32::from_bits(self.status.tpeak.load(Ordering::Relaxed));
         }
         self.load_hold = f32::from_bits(self.status.load.load(Ordering::Relaxed));
+        // reconectar solo si el audio o el micrófono se cortaron (como mucho una vez por segundo)
+        if self.reconexion.is_none_or(|t| t.elapsed() > Duration::from_secs(1)) {
+            if self.status.audio_caido.swap(false, Ordering::Relaxed) {
+                self.reconexion = Some(Instant::now());
+                self.reiniciar_audio();
+                self.msg = "Se reconectó el audio.".into();
+            }
+            if self.status.mic_caido.swap(false, Ordering::Relaxed) {
+                self.reconexion = Some(Instant::now());
+                self.mic_mon = None;
+                self.escucha_sync();
+            }
+        }
+        if self.reconexion.is_some_and(|t| t.elapsed() < Duration::from_secs(3)) {
+            ctx.request_repaint_after(Duration::from_millis(300));
+        }
+        self.status.metro_vol.store(self.settings.metro_vol.to_bits(), Ordering::Relaxed);
+        self.status.metro_sonido.store(self.settings.metro_sonido as u32, Ordering::Relaxed);
+        self.status.metro_acento.store(self.settings.metro_acento, Ordering::Relaxed);
+        self.status.metro_sub.store(self.settings.metro_sub as u32, Ordering::Relaxed);
+        // Android: pedir los permisos (micrófono y archivos de audio) al abrir la app
+        // (cuando la app está en pantalla: si se pide con el teléfono bloqueado, el aviso se pierde)
+        #[cfg(target_os = "android")]
+        if !self.permisos_pedidos && self.inicio.elapsed() < Duration::from_millis(1500) {
+            // la app solo se redibuja cuando pasa algo: se pide un redibujo para llegar al momento de pedir permisos
+            ctx.request_repaint_after(Duration::from_millis(300));
+        }
+        #[cfg(target_os = "android")]
+        if !self.permisos_pedidos && self.inicio.elapsed() >= Duration::from_millis(1500) {
+            self.permisos_pedidos = true;
+            // al abrir solo el micrófono; el de los archivos se pide al buscar un sonido en el teléfono
+            let r = audio::pedir_permisos(&["android.permission.RECORD_AUDIO"]);
+            if r.starts_with("error") {
+                self.msg = format!("No se pudieron pedir los permisos: {r}");
+            } else {
+                self.mic_esperando = Some(Instant::now());
+            }
+        }
+        // sin el permiso del micrófono la app no sigue
+        #[cfg(target_os = "android")]
+        if let Some(t0) = self.mic_esperando {
+            ctx.request_repaint_after(Duration::from_millis(400));
+            if audio::permiso_concedido("android.permission.RECORD_AUDIO") {
+                self.mic_esperando = None;
+            } else if t0.elapsed() > Duration::from_millis(1200) && audio::ventana_con_foco() {
+                // el aviso ya se cerró y no se concedió
+                audio::cerrar_app();
+            }
+        }
         let inp = f32::from_bits(self.status.input.swap(0, Ordering::Relaxed));
         self.in_meter = inp.max(self.in_meter * 0.9);
         self.rec_update();
@@ -2281,9 +2569,27 @@ impl eframe::App for StudioApp {
             Frame::new().fill(Color32::from_gray(20)).stroke(Stroke::new(1.0, Color32::from_gray(38))).corner_radius(99).inner_margin(Margin::symmetric(14, 4)).show(ui, |ui| self.top_bar(ui, compact));
         });
         egui::Panel::bottom("status").frame(Frame::new().fill(Color32::from_gray(15)).inner_margin(Margin::symmetric(4, 3))).show(ui, |ui| self.status_bar(ui));
-        let mut abierto = self.mic_panel;
-        egui::Panel::bottom("micro").frame(Frame::new().fill(PANEL).inner_margin(Margin::symmetric(14, 10)).stroke(Stroke::new(1.0, LINE))).show_collapsible(ui, &mut abierto, |ui| self.micro_panel(ui));
-        self.mic_panel = abierto && self.mic_panel;
+        // en el teléfono el micrófono y el masterizado usan toda la pantalla: uno a la vez
+        // (si quedan los dos abiertos, se cierra el que ya estaba y queda el que acabas de abrir)
+        if compact && self.mic_panel && self.mast_panel {
+            if self.mic_antes_que_mast {
+                self.mic_panel = false;
+            } else {
+                self.mast_panel = false;
+            }
+        }
+        self.mic_antes_que_mast = self.mic_panel;
+        // en la PC el masterizado va primero: ocupa todo el alto a la derecha y el micrófono queda abajo, a su lado
+        if !compact {
+            let mut ver_mast = self.mast_panel;
+            egui::Panel::right("masterizado").default_size(330.0).min_size(290.0).frame(Frame::new().fill(PANEL).inner_margin(Margin::same(12)).stroke(Stroke::new(1.0, LINE))).show_collapsible(ui, &mut ver_mast, |ui| self.panel_masterizado(ui));
+            let mut abierto = self.mic_panel;
+            egui::Panel::bottom("micro").frame(Frame::new().fill(PANEL).inner_margin(Margin::symmetric(14, 10)).stroke(Stroke::new(1.0, LINE))).show_collapsible(ui, &mut abierto, |ui| {
+                // si no entra a lo ancho, se desliza de lado en vez de montarse
+                egui::ScrollArea::horizontal().id_salt("micro_pc").auto_shrink([false, true]).show(ui, |ui| self.micro_panel(ui));
+            });
+            self.mic_panel = abierto && self.mic_panel;
+        }
         let mut ver_letras = self.letras_panel;
         egui::Panel::right("letras").default_size(300.0).frame(Frame::new().fill(PANEL).inner_margin(Margin::same(12)).stroke(Stroke::new(1.0, LINE))).show_collapsible(ui, &mut ver_letras, |ui| {
             ui.horizontal(|ui| {
@@ -2308,7 +2614,14 @@ impl eframe::App for StudioApp {
             });
         });
         self.letras_panel = ver_letras && self.letras_panel;
-        if compact {
+        if compact && self.mast_panel {
+            egui::CentralPanel::default().frame(Frame::new().fill(PANEL).inner_margin(Margin::symmetric(12, 10))).show(ui, |ui| self.panel_masterizado(ui));
+        } else if compact && self.mic_panel {
+            // en el teléfono el micrófono y NN Tune usan toda la pantalla (se desplaza con el dedo)
+            egui::CentralPanel::default().frame(Frame::new().fill(PANEL).inner_margin(Margin::symmetric(10, 8))).show(ui, |ui| {
+                egui::ScrollArea::both().id_salt("micro_movil").auto_shrink([false, false]).show(ui, |ui| self.micro_panel(ui));
+            });
+        } else if compact {
             egui::Panel::top("tabs").frame(Frame::new().fill(Color32::from_gray(18)).inner_margin(Margin::symmetric(0, 4))).show(ui, |ui| self.view_tabs(ui, true));
             let v = self.view;
             egui::CentralPanel::default().frame(Frame::new().fill(PANEL)).show(ui, |ui| self.show_view(ui, v));
@@ -2325,6 +2638,7 @@ impl eframe::App for StudioApp {
         self.playlist_menu(&ctx);
         self.dialogo_guardar(&ctx);
         self.dialogo_rescate(&ctx);
+        self.selector_audio(&ctx);
         if ctx.input(|i| i.viewport().close_requested()) && !self.cerrar_ok && self.cambios && self.settings.preguntar && self.autotest.is_none() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.pendiente = Some(Pend::Cerrar);
@@ -2335,9 +2649,13 @@ impl eframe::App for StudioApp {
             self.titulo = titulo.clone();
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(titulo));
         }
-        if (self.settings.zoom - self.zoom_puesto).abs() > 0.001 {
+        // tamaño de la interfaz: se revisa en cada cuadro porque Android lo reinicia al volver a la app
+        // en el teléfono la escala nativa (≈2,75) deja todo enorme: se usa el 60 %
+        let base = if self.plat.mobile { 0.6 } else { 1.0 };
+        let deseado = (self.settings.zoom * base).clamp(0.5, 2.0);
+        if (ctx.zoom_factor() - deseado).abs() > 0.001 {
             self.zoom_puesto = self.settings.zoom;
-            ctx.set_zoom_factor(self.settings.zoom.clamp(0.6, 2.0));
+            ctx.set_zoom_factor(deseado);
         }
         // primero se contesta si se recupera el trabajo; el tutorial espera
         if !self.rescate {
@@ -2418,8 +2736,10 @@ fn icon_button(ui: &mut Ui, ic: Ic, size: Vec2, selected: bool, fill: Option<Col
     let bg = lerp_col(base, hover, t);
     let p = ui.painter();
     let r = rect.expand(t * 0.8);
-    p.rect_filled(r, (size.y * 0.5).min(9.0), bg);
-    let col = if selected || fill.is_some() { Color32::WHITE } else { lerp_col(Color32::from_gray(220), Color32::WHITE, t) };
+    p.rect_filled(r, size.y * 0.5, bg);
+    // sobre fondo claro (plateado) el ícono va oscuro; sobre fondo oscuro, blanco
+    let claro = (bg.r() as u32 * 299 + bg.g() as u32 * 587 + bg.b() as u32 * 114) / 1000 > 150;
+    let col = if claro { Color32::from_gray(20) } else if selected || fill.is_some() { Color32::WHITE } else { lerp_col(Color32::from_gray(220), Color32::WHITE, t) };
     draw_icon(p, ic, rect.center(), rect.height().min(rect.width()) * 0.3, col);
     resp
 }
@@ -2750,4 +3070,10 @@ fn pestana_metal(ui: &mut Ui, sel: bool, texto: &str, ancho_min: f32) -> Respons
     }
     p.text(r.center(), Align2::CENTER_CENTER, texto, FontId::proportional(13.5), lerp_col(Color32::from_gray(200), Color32::WHITE, t));
     resp
+}
+
+/// Contenido de un menú que se puede deslizar (con el dedo o la rueda) si no entra en la pantalla.
+fn desplazable<R>(ui: &mut Ui, f: impl FnOnce(&mut Ui) -> R) -> R {
+    let alto = (ui.ctx().content_rect().height() - 70.0).max(140.0);
+    egui::ScrollArea::vertical().max_height(alto).auto_shrink([true, true]).show(ui, f).inner
 }

@@ -19,6 +19,8 @@ pub(super) enum Win {
     Settings,
     Micro,
     Retune(u32),
+    /// efectos NN de un canal (0 = master)
+    Efectos(u32),
 }
 
 pub(super) struct TakeView {
@@ -258,6 +260,18 @@ impl StudioApp {
         }
     }
 
+    /// Botones de ajustes: un clic abre la ventana y otro clic la cierra.
+    pub(super) fn alternar_win(&mut self, w: Win) {
+        if let Some(i) = self.wins.iter().position(|x| *x == w) {
+            self.wins.remove(i);
+            if matches!(w, Win::Retune(_)) {
+                self.retune_detener();
+            }
+        } else {
+            self.open_win(w);
+        }
+    }
+
     pub(super) fn open_win(&mut self, w: Win) {
         if !self.wins.contains(&w) {
             self.wins.push(w);
@@ -284,6 +298,8 @@ impl StudioApp {
             Win::Settings => "Ajustes".into(),
             Win::Micro => "Micrófono".into(),
             Win::Retune(_) => "Retune — edita la voz nota por nota".into(),
+            Win::Efectos(0) => "Efectos — Master".into(),
+            Win::Efectos(id) => format!("Efectos — {}", cn(id)),
         }
     }
 
@@ -296,6 +312,7 @@ impl StudioApp {
                 Win::Inserts(id) if id != 0 => self.p.channel(id).is_some(),
                 Win::Auto(id) => self.p.auto_clip(id).is_some(),
                 Win::Clip(id) | Win::Retune(id) => self.p.audio_clip(id).is_some(),
+                Win::Efectos(id) if id != 0 => self.p.channel(id).is_some(),
                 _ => true,
             };
             if !exists {
@@ -303,14 +320,24 @@ impl StudioApp {
                 continue;
             }
             let mut open = true;
-            egui::Window::new(RichText::new(self.win_title(w)).strong())
+            let pantalla = ctx.content_rect();
+            let mut ventana = egui::Window::new(RichText::new(self.win_title(w)).strong())
                 .id(egui::Id::new(("plugin", format!("{w:?}"))))
                 .open(&mut open)
                 .resizable(false)
                 .collapsible(true)
                 .default_pos(Pos2::new(120.0 + i as f32 * 30.0, 110.0 + i as f32 * 30.0))
-                .frame(Frame::window(&ctx.global_style()).fill(Color32::from_gray(25)))
-                .show(ctx, |ui| match w {
+                .frame(Frame::window(&ctx.global_style()).fill(Color32::from_gray(25)));
+            if w == Win::Settings || self.plat.mobile {
+                // como un cuadro de diálogo: al centro de la pantalla y, si no entra, se desliza
+                ventana = ventana
+                    .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+                    .collapsible(false)
+                    .vscroll(true)
+                    .max_height((pantalla.height() - 50.0).max(200.0))
+                    .max_width((pantalla.width() - 30.0).max(300.0));
+            }
+            ventana.show(ctx, |ui| match w {
                     Win::Eq(ch) => self.eq_window(ui, ch),
                     Win::Comp(ch) => self.comp_window(ui, ch),
                     Win::Dyn => self.dyn_window(ui),
@@ -325,6 +352,7 @@ impl StudioApp {
                     Win::Master => self.master_window(ui),
                     Win::Settings => self.settings_window(ui),
                     Win::Retune(id) => self.retune_window(ui, id),
+                    Win::Efectos(ch) => self.efectos_window(ui, ch),
                     Win::Micro => {
                         ui.label("El micrófono ahora está en el panel de abajo.");
                     }
@@ -829,6 +857,10 @@ impl StudioApp {
                         kn!(ui, st, chg, &mut s.lfo_rate, 0.05, 12.0, 0.3, "Vel.", |v| format!("{v:.2} Hz"));
                         kn!(ui, st, chg, &mut s.lfo_depth, 0.0, 1.0, 0.0, "Prof.", |v| format!("{:.0}%", v * 100.0));
                         kn!(ui, st, chg, &mut s.level, 0.0, 1.0, 0.55, "Volumen", |v| format!("{:.0}%", v * 100.0));
+                    });
+                    ui.horizontal(|ui| {
+                        kn!(ui, st, chg, &mut s.glide, 0.0, 0.5, 0.0, "Glide", |v| if v < 0.001 { "No".to_string() } else { format!("{:.0} ms", v * 1000.0) });
+                        kn!(ui, st, chg, &mut s.vel_filtro, 0.0, 1.0, 0.0, "Vel.→filtro", |v| format!("{:.0}%", v * 100.0));
                     });
                 });
             });

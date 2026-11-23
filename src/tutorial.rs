@@ -185,7 +185,8 @@ impl StudioApp {
         }
 
         // tarjeta: debajo de la zona si cabe, si no encima, si no en una esquina
-        let ancho = (screen.width() - 32.0).min(430.0);
+        // en el primer cuadro la pantalla puede medir casi cero: nunca un ancho negativo
+        let ancho = (screen.width() - 32.0).min(430.0).max(200.0);
         let alto_aprox = 230.0;
         let (pos, pivote, flecha) = match zona {
             None => (screen.center(), Align2::CENTER_CENTER, None),
@@ -251,8 +252,14 @@ impl StudioApp {
                             _ => ("Siguiente", false),
                         };
                         let listo = hecho || paso.accion == Accion::Leer;
-                        let b = egui::Button::new(RichText::new(txt).strong().color(if listo { Color32::WHITE } else { DIM })).fill(if listo { ACCENT } else { PANEL2 }).min_size(Vec2::new(140.0, 32.0));
-                        if ui.add_enabled(listo, b).clicked() {
+                        // listo: botón de metal líquido; si falta hacer el paso, gris y apagado
+                        let clic = if listo {
+                            boton_metal(ui, txt, Vec2::new(if ultimo { 180.0 } else { 140.0 }, 34.0)).clicked()
+                        } else {
+                            ui.add_enabled(false, egui::Button::new(RichText::new(txt).strong().color(DIM)).min_size(Vec2::new(140.0, 32.0)));
+                            false
+                        };
+                        if clic {
                             if ultimo {
                                 fin = true;
                             } else {

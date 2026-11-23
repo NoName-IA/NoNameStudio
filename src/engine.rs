@@ -61,7 +61,18 @@ pub struct Status {
     pub load: AtomicU32,
     /// últimas muestras del master (mono) para el analizador de espectro
     pub scope: std::sync::Mutex<Vec<f32>>,
+    /// últimas muestras estéreo del master (L, R intercaladas) para el osciloscopio y el vectorscopio
+    pub estereo: std::sync::Mutex<Vec<f32>>,
     pub monitor: Monitor,
+    /// metrónomo: volumen (f32 en bits), sonido (0 clásico, 1 madera, 2 electrónico, 3 suave),
+    /// acento en el primer tiempo y subdivisión (0 negras, 1 corcheas)
+    pub metro_vol: AtomicU32,
+    pub metro_sonido: AtomicU32,
+    pub metro_acento: AtomicBool,
+    pub metro_sub: AtomicU32,
+    /// el audio o el micrófono se cortaron (cambio de dispositivo, la app volvió del fondo): hay que reconectar
+    pub audio_caido: AtomicBool,
+    pub mic_caido: AtomicBool,
 }
 impl Default for Status {
     fn default() -> Self {
@@ -82,6 +93,13 @@ impl Status {
             tpeak: z(),
             load: z(),
             scope: std::sync::Mutex::new(vec![0.0; 2048]),
+            estereo: std::sync::Mutex::new(vec![0.0; 2048]),
+            metro_vol: AtomicU32::new(0.8f32.to_bits()),
+            metro_sonido: AtomicU32::new(0),
+            metro_acento: AtomicBool::new(true),
+            metro_sub: AtomicU32::new(0),
+            audio_caido: AtomicBool::new(false),
+            mic_caido: AtomicBool::new(false),
             monitor: Monitor {
                 cola: std::sync::Mutex::new(std::collections::VecDeque::with_capacity(48_000)),
                 sr: AtomicU32::new(48_000),
@@ -147,9 +165,15 @@ pub trait Proc: Send {
 pub enum Cmd {
     Project(Box<Project>),
     Play { mode: Mode, from_step: u32 },
+    /// precuenta: tantos pasos de metrónomo antes de que arranque la canción
+    Precuenta(u32),
     Stop,
     SetMode(Mode),
     Metronome(bool),
+    /// un golpe de metrónomo para escuchar el sonido elegido
+    ClicPrueba,
+    /// escuchar sin el masterizado (para comparar)
+    SinMaster(bool),
     Preview { ch: u32, m: u8, v: f32 },
     /// teclado MIDI: nota sostenida hasta NoteOff
     NoteOn { ch: u32, m: u8, v: f32 },
@@ -180,6 +204,9 @@ struct Click {
     t: f32,
     f: f32,
     a: f32,
+    /// caída del golpe (segundos) y si suena como madera (con un poco de ruido)
+    dec: f32,
+    ruido: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -211,6 +238,8 @@ pub struct Engine {
     chl: Vec<Vec<f32>>,
     chr: Vec<Vec<f32>>,
     quiet: Vec<u32>,
+    /// estado de los efectos NN de cada canal (por id; 0 = master)
+    efectos: std::collections::HashMap<u32, Vec<crate::efectos::Proceso>>,
     tl: Vec<f32>,
     tr: Vec<f32>,
     mixl: Vec<f32>,
@@ -262,6 +291,11 @@ pub struct Engine {
     mon_env: f32,
     mon_agc: f32,
     mon_verb: crate::fx::Verb,
+    /// última nota tocada en cada canal (para el glide del sintetizador)
+    ultima_nota: Vec<f32>,
+    /// muestras de precuenta que faltan y muestras ya contadas
+    precuenta: u64,
+    precuenta_pos: u64,
     /// llamadas seguidas en silencio total estando detenido (con muchas, el motor descansa)
     reposo: u32,
 }
@@ -283,6 +317,7 @@ impl Engine {
             chl: (0..MAX_CH).map(|_| buf()).collect(),
             chr: (0..MAX_CH).map(|_| buf()).collect(),
             quiet: vec![u32::MAX; MAX_CH],
+            efectos: std::collections::HashMap::new(),
             tl: buf(),
             tr: buf(),
             mixl: buf(),
@@ -331,6 +366,9 @@ impl Engine {
             mon_agc: 1.0,
             mon_verb: crate::fx::Verb::new(sr),
             reposo: 0,
+            precuenta: 0,
+            precuenta_pos: 0,
+            ultima_nota: vec![0.0; MAX_CH],
         };
         e.sync_strips();
         e
@@ -425,7 +463,14 @@ impl Engine {
                 self.sync_strips();
             }
             Cmd::Play { mode, from_step } => self.start(mode, from_step),
+            Cmd::ClicPrueba => self.clic(0, 0),
+            Cmd::SinMaster(b) => self.bypass_master = b,
+            Cmd::Precuenta(pasos) => {
+                self.precuenta = (pasos as f64 * self.sps()) as u64;
+                self.precuenta_pos = 0;
+            }
             Cmd::Stop => {
+                self.precuenta = 0;
                 self.status.monitor.acorde.store(0, Ordering::Relaxed);
                 self.playing = false;
                 self.status.playing.store(false, Ordering::Relaxed);
@@ -747,13 +792,34 @@ impl Engine {
                 }
             }
         }
-        if self.metro && !self.offline && s % 4 == 0 {
-            self.clicks.push(Click { delay: base_delay as u32, t: 0.0, f: if s % 16 == 0 { 1600.0 } else { 1050.0 }, a: if s % 16 == 0 { 0.35 } else { 0.2 } });
+        if self.metro && !self.offline {
+            self.clic(base_delay as u32, s);
         }
         if self.voices.len() > 900 {
             let extra = self.voices.len() - 900;
             self.voices.drain(..extra);
         }
+    }
+
+    /// Golpe del metrónomo en el paso `s` (respeta sonido, volumen, acento y subdivisión).
+    fn clic(&mut self, delay: u32, s: u64) {
+        let st = &self.status;
+        let sub = if st.metro_sub.load(Ordering::Relaxed) == 1 { 2 } else { 4 };
+        if s % sub != 0 {
+            return;
+        }
+        let vol = f32::from_bits(st.metro_vol.load(Ordering::Relaxed)).clamp(0.0, 1.5);
+        let fuerte = s % 16 == 0 && st.metro_acento.load(Ordering::Relaxed);
+        let debil = s % 4 != 0; // corcheas entre tiempos: más suaves
+        // (agudo del acento, agudo normal, caída, ruido) de cada sonido
+        let (fa, fn_, dec, ruido) = match st.metro_sonido.load(Ordering::Relaxed) {
+            1 => (2400.0, 1700.0, 0.006, 0.5),
+            2 => (1200.0, 880.0, 0.02, 0.0),
+            3 => (990.0, 740.0, 0.03, 0.0),
+            _ => (1600.0, 1050.0, 0.012, 0.0),
+        };
+        let a = if fuerte { 0.35 } else if debil { 0.12 } else { 0.2 };
+        self.clicks.push(Click { delay, t: 0.0, f: if fuerte { fa } else { fn_ }, a: a * vol, dec, ruido });
     }
 
     /// Crea la voz (o el evento de plugin) de una nota.
@@ -767,7 +833,14 @@ impl Engine {
             Inst::Rhodes | Inst::Pad | Inst::Bass | Inst::Bell => {
                 self.voices.push(Voice::new(t.ci, c.inst, t.delay, t.v, t.m + c.tune, t.len, c.tune, c.decay, t.seed, sr));
             }
-            Inst::Synth => self.voices.push(Voice::synth(t.ci, t.delay, t.v, t.m + c.tune, t.len, c.synth, t.seed, sr)),
+            Inst::Synth => {
+                let m = t.m + c.tune;
+                let desde = self.ultima_nota.get(t.ci).copied().filter(|x| *x > 0.0);
+                self.voices.push(Voice::synth(t.ci, t.delay, t.v, m, t.len, c.synth, t.seed, sr, desde));
+                if let Some(u) = self.ultima_nota.get_mut(t.ci) {
+                    *u = m;
+                }
+            }
             Inst::Sampler => {
                 if let Some(v) = self.sampler_voice(t.ci, t.m, t.v, t.len, t.delay) {
                     self.voices.push(v);
@@ -1065,13 +1138,38 @@ impl Engine {
                 sc[n - f + i] = (out[j * 2] + out[j * 2 + 1]) * 0.5;
             }
         }
+        if let Ok(mut sc) = st.estereo.try_lock() {
+            let n = sc.len();
+            let f = (total * 2).min(n);
+            sc.copy_within(f.., 0);
+            sc[n - f..].copy_from_slice(&out[total * 2 - f..total * 2]);
+        }
     }
 
     fn render_block(&mut self, out: &mut [f32]) {
         let frames = out.len() / 2;
         let sps = self.sps();
         let sr = self.sr;
-        if self.playing {
+        // precuenta: suena el metrónomo y la canción todavía no avanza
+        if self.precuenta > 0 && self.playing {
+            let sps = self.sps();
+            let fin = self.precuenta_pos + frames as u64;
+            let mut paso = ((self.precuenta_pos as f64) / sps).ceil() as u64;
+            while (paso as f64 * sps) < fin as f64 && (paso as f64 * sps) < self.precuenta as f64 {
+                let delay = (paso as f64 * sps) as u64 - self.precuenta_pos;
+                self.clic(delay as u32, paso);
+                paso += 1;
+            }
+            if fin >= self.precuenta {
+                // la canción arranca justo en la muestra donde termina la cuenta
+                self.pos = -((self.precuenta - self.precuenta_pos) as f64);
+                self.precuenta = 0;
+            } else {
+                self.precuenta_pos = fin;
+            }
+        }
+        let en_precuenta = self.precuenta > 0;
+        if self.playing && self.precuenta == 0 {
             // se programa un poco por adelantado para que la humanización pueda adelantar golpes
             let end = self.pos + frames as f64 + LOOKAHEAD;
             let song_steps = (self.proj.song_bars() * STEPS_PER_BAR) as u64;
@@ -1180,7 +1278,9 @@ impl Engine {
             if spc > 0.0 {
                 any_space = true;
             }
-            let has_ins = self.inserts.get(&id).is_some_and(|v| !v.is_empty()) && c.inserts.iter().any(|s| s.on);
+            // con efectos que dejan cola (ecos) el canal no se salta aunque la entrada esté en silencio
+            let con_cola = c.efectos.iter().any(|e| e.on && crate::efectos::Proceso::tiene_cola(e.tipo));
+            let has_ins = (self.inserts.get(&id).is_some_and(|v| !v.is_empty()) && c.inserts.iter().any(|s| s.on)) || con_cola;
             let silent = self.chl[i][..frames].iter().all(|x| *x == 0.0) && self.chr[i][..frames].iter().all(|x| *x == 0.0);
             if silent {
                 self.quiet[i] = self.quiet[i].saturating_add(frames as u32);
@@ -1203,6 +1303,16 @@ impl Engine {
                 let (l, r) = self.strips[i].run_fx(l, r, &comp, key, sr);
                 self.tl[f] = l;
                 self.tr[f] = r;
+            }
+            if !c.efectos.is_empty() {
+                let pasos_s = (1.0 / sps.max(1.0)) as f32 * sr;
+                let procs = self.efectos.entry(id).or_default();
+                crate::efectos::sincronizar(procs, &c.efectos, sr);
+                for (pr, e) in procs.iter_mut().zip(c.efectos.iter()) {
+                    if e.on {
+                        pr.procesar(&mut self.tl[..frames], &mut self.tr[..frames], e, pasos_s);
+                    }
+                }
             }
             if has_ins {
                 if let Some(list) = self.inserts.get_mut(&id) {
@@ -1276,6 +1386,18 @@ impl Engine {
                 }
             }
         }
+        // efectos NN del master
+        if !bypass && !self.proj.master_efectos.is_empty() {
+            let pasos_s = (1.0 / sps.max(1.0)) as f32 * sr;
+            let lista = &self.proj.master_efectos;
+            let procs = self.efectos.entry(0).or_default();
+            crate::efectos::sincronizar(procs, lista, sr);
+            for (pr, e) in procs.iter_mut().zip(lista.iter()) {
+                if e.on {
+                    pr.procesar(&mut self.mixl[..frames], &mut self.mixr[..frames], e, pasos_s);
+                }
+            }
+        }
         let mut gr = [0f32; 2];
         let mut mpk = [0f32; 2];
         for f in 0..frames {
@@ -1299,7 +1421,13 @@ impl Engine {
                         c.delay -= 1;
                         continue;
                     }
-                    let s = (c.t * c.f * std::f32::consts::TAU).sin() * c.a * (-c.t / 0.012).exp();
+                    let mut s = (c.t * c.f * std::f32::consts::TAU).sin();
+                    if c.ruido > 0.0 {
+                        // un poco de ruido para que suene a madera
+                        let h = ((c.t * 1e6) as u32).wrapping_mul(2654435761);
+                        s += c.ruido * ((h >> 8) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0);
+                    }
+                    let s = s * c.a * (-c.t / c.dec).exp();
                     ol += s;
                     or += s;
                     c.t += dt;
@@ -1308,12 +1436,12 @@ impl Engine {
             out[f * 2] = ol;
             out[f * 2 + 1] = or;
         }
-        self.clicks.retain(|c| c.t < 0.08);
+        self.clicks.retain(|c| c.t < (c.dec * 7.0).max(0.04));
         self.mix_monitor(out);
         if self.prev_voice.as_ref().is_some_and(|v| v.done) {
             self.prev_voice = None;
         }
-        if self.playing {
+        if self.playing && !en_precuenta {
             self.pos += frames as f64;
         }
         self.clock += frames as u64;

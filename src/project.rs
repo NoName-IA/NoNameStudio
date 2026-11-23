@@ -124,6 +124,9 @@ pub struct Channel {
     /// Plugins de efecto (CLAP) insertados después de NN Dynamics
     #[serde(default)]
     pub inserts: Vec<PluginSlot>,
+    /// efectos NN del canal (chorus, delay de cinta…), después de NN Dynamics
+    #[serde(default)]
+    pub efectos: Vec<crate::efectos::EfectoP>,
     /// Instrumento externo (solo canales Plugin)
     #[serde(default)]
     pub instrument: Option<PluginSlot>,
@@ -155,6 +158,7 @@ impl Channel {
             smp: SampleP::default(),
             arp: ArpP::default(),
             inserts: vec![],
+            efectos: vec![],
             instrument: None,
         }
     }
@@ -501,6 +505,9 @@ pub struct Project {
     /// letras y notas de la canción
     #[serde(default)]
     pub letras: String,
+    /// efectos NN del master
+    #[serde(default)]
+    pub master_efectos: Vec<crate::efectos::EfectoP>,
 }
 
 pub const PALETTE: [[u8; 3]; 8] = [
@@ -643,6 +650,7 @@ impl Project {
             loop_b: 4,
             master_inserts: vec![],
             letras: String::new(),
+            master_efectos: vec![],
             pistas: vec![],
         }
     }
@@ -694,6 +702,7 @@ impl Project {
             loop_b: 4,
             master_inserts: vec![],
             letras: String::new(),
+            master_efectos: vec![],
             pistas: vec![],
         };
         let mk = |p: &mut Project, inst: Inst, vol: f32, pan: f32| {
@@ -921,13 +930,19 @@ pub struct SynthP {
     /// 0 = filtro, 1 = tabla de ondas, 2 = tono
     pub lfo_target: u8,
     pub level: f32,
+    /// portamento: segundos que tarda en deslizarse desde la nota anterior (0 = sin glide)
+    #[serde(default)]
+    pub glide: f32,
+    /// cuánto abre el filtro una nota tocada fuerte (0…1)
+    #[serde(default)]
+    pub vel_filtro: f32,
 }
 impl Default for SynthP {
     fn default() -> Self {
         SynthP::preset(0)
     }
 }
-pub const SYNTH_PRESETS: [&str; 12] = ["Supersaw", "Pluck", "Pad atmosférico", "Bajo reese", "Lead cuadrado", "Campanas FM", "Lead trap", "Cuerdas", "Bajo acid", "Arpegio brillante", "Órgano", "Pad oscuro"];
+pub const SYNTH_PRESETS: [&str; 20] = ["Supersaw", "Pluck", "Pad atmosférico", "Bajo reese", "Lead cuadrado", "Campanas FM", "Lead trap", "Cuerdas", "Bajo acid", "Arpegio brillante", "Órgano", "Pad oscuro", "Piano eléctrico", "Vibráfono", "Clavecín", "Pad cálido", "Tom 808", "Bajo transistor", "Lead con glide", "Coro"];
 impl SynthP {
     pub fn preset(i: usize) -> SynthP {
         let o = |wt: f32, oct: i32, level: f32, unison: u32, detune: f32| OscP { on: true, wt, oct, semi: 0, fine: 0.0, level, unison, detune };
@@ -944,8 +959,83 @@ impl SynthP {
             lfo_depth: 0.0,
             lfo_target: 0,
             level: 0.55,
+            glide: 0.0,
+            vel_filtro: 0.0,
         };
         match i {
+            12 => {
+                // piano eléctrico: seno con un toque metálico arriba
+                p.osc = [o(0.0, 0, 0.85, 1, 0.0), o(0.5, 2, 0.22, 1, 0.0)];
+                p.cutoff = 5000.0;
+                p.fenv = 0.25;
+                p.amp = [0.003, 1.4, 0.25, 0.4];
+                p.fadsr = [0.001, 0.6, 0.3, 0.4];
+                p.vel_filtro = 0.5;
+            }
+            13 => {
+                p.osc = [o(0.0, 0, 0.8, 1, 0.0), o(0.0, 2, 0.3, 1, 0.0)];
+                p.cutoff = 8000.0;
+                p.fenv = 0.0;
+                p.amp = [0.002, 1.8, 0.0, 1.2];
+                p.lfo_depth = 0.02;
+                p.lfo_rate = 5.5;
+                p.lfo_target = 2;
+            }
+            14 => {
+                p.osc = [o(2.0, 0, 0.7, 1, 0.0), o(3.0, 1, 0.3, 1, 0.0)];
+                p.cutoff = 6000.0;
+                p.fenv = 0.4;
+                p.amp = [0.001, 0.5, 0.0, 0.3];
+                p.fadsr = [0.001, 0.3, 0.0, 0.2];
+            }
+            15 => {
+                p.osc = [o(1.0, 0, 0.7, 5, 0.2), o(2.0, -1, 0.3, 3, 0.1)];
+                p.cutoff = 1500.0;
+                p.fenv = 0.1;
+                p.amp = [0.6, 1.0, 0.9, 1.5];
+                p.lfo_depth = 0.2;
+                p.lfo_rate = 0.3;
+                p.lfo_target = 0;
+            }
+            16 => {
+                // tom 808: tono grave que cae (glide desde una octava arriba)
+                p.osc = [o(0.0, -1, 0.95, 1, 0.0), off];
+                p.cutoff = 3000.0;
+                p.fenv = 0.0;
+                p.amp = [0.001, 0.6, 0.0, 0.5];
+                p.glide = 0.08;
+            }
+            17 => {
+                // bajo transistor (estilo acid): filtro resonante, glide y velocidad al filtro
+                p.osc = [o(2.0, -1, 0.9, 1, 0.0), off];
+                p.cutoff = 380.0;
+                p.reso = 0.82;
+                p.fenv = 0.9;
+                p.amp = [0.002, 0.25, 0.7, 0.06];
+                p.fadsr = [0.001, 0.2, 0.05, 0.1];
+                p.glide = 0.06;
+                p.vel_filtro = 0.7;
+            }
+            18 => {
+                p.osc = [o(3.0, 0, 0.75, 2, 0.05), o(2.0, 0, 0.3, 1, 0.0)];
+                p.cutoff = 4500.0;
+                p.fenv = 0.15;
+                p.amp = [0.005, 0.3, 0.8, 0.25];
+                p.glide = 0.12;
+                p.lfo_depth = 0.04;
+                p.lfo_rate = 5.0;
+                p.lfo_target = 2;
+            }
+            19 => {
+                p.osc = [o(1.4, 0, 0.6, 7, 0.3), o(1.4, 1, 0.25, 3, 0.15)];
+                p.cutoff = 2200.0;
+                p.reso = 0.3;
+                p.fenv = 0.05;
+                p.amp = [0.35, 0.6, 0.85, 1.2];
+                p.lfo_depth = 0.25;
+                p.lfo_rate = 0.4;
+                p.lfo_target = 1;
+            }
             1 => {
                 p.osc = [o(2.6, 0, 0.8, 3, 0.12), off];
                 p.cutoff = 1200.0;

@@ -94,16 +94,23 @@ impl StudioApp {
             ui.label(RichText::new("· tu voz en vivo").color(DIM));
         });
         ui.add_space(6.0);
-        ui.horizontal_top(|ui| {
+        let apilado = self.plat.mobile || ui.available_width() < 1000.0;
+        ui.with_layout(if apilado { Layout::top_down(Align::Min) } else { Layout::left_to_right(Align::Min) }, |ui| {
             // ---------------- izquierda: entrada y escucha
             ui.vertical(|ui| {
                 ui.set_width(230.0);
                 ui.label(RichText::new("Entrada").strong());
-                let entradas = audio::inputs();
-                let actual = if self.settings.entrada.is_empty() { "Micrófono de Windows".to_string() } else { self.settings.entrada.clone() };
+                // micrófonos conectados (se vuelven a buscar cada 3 s: así aparecen los que se conectan)
+                if self.entradas_t.is_none_or(|t| t.elapsed() > Duration::from_secs(3)) {
+                    self.entradas = audio::inputs();
+                    self.salidas = audio::outputs();
+                    self.entradas_t = Some(Instant::now());
+                }
+                let entradas = self.entradas.clone();
+                let actual = if self.settings.entrada.is_empty() { audio::PREDETERMINADO_ENTRADA.to_string() } else { self.settings.entrada.clone() };
                 let mut nueva = self.settings.entrada.clone();
                 egui::ComboBox::from_id_salt("mic_in").width(220.0).truncate().selected_text(actual).show_ui(ui, |ui| {
-                    ui.selectable_value(&mut nueva, String::new(), "Micrófono de Windows");
+                    ui.selectable_value(&mut nueva, String::new(), audio::PREDETERMINADO_ENTRADA);
                     for n in &entradas {
                         ui.selectable_value(&mut nueva, n.clone(), n);
                     }
@@ -430,10 +437,23 @@ impl StudioApp {
                 }
                 ui.add_space(8.0);
                 self.fila_vivo(ui, cantada, objetivo, acorde, oyendo);
+                if apilado {
+                    // en pantallas chicas el volumen va dentro de la tarjeta
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Volumen").strong());
+                        ui.spacing_mut().slider_width = 200.0;
+                        ui.add(egui::Slider::new(&mut self.settings.vol_escucha, 0.0..=2.0).custom_formatter(|v, _| format!("{:.0} %", v * 100.0)));
+                        ui.add_space(12.0);
+                        perilla(ui, &mut self.settings.pan_escucha, -1.0, 1.0, 0.0, "Paneo", "Mueve tu voz a la izquierda o a la derecha · doble toque: al centro");
+                        perilla(ui, &mut self.settings.reverb_escucha, 0.0, 1.0, 0.0, "Reverb", "Reverberación: tu voz como en una sala · doble toque: sin reverberación");
+                    });
+                }
                 });
             });
             ui.add_space(12.0);
-            // ---------------- derecha: volumen de la voz
+            // ---------------- derecha: volumen de la voz (en pantallas chicas va dentro de la tarjeta)
+            if !apilado {
             ui.vertical(|ui| {
                 ui.set_width(130.0);
                 ui.add_space(10.0);
@@ -471,6 +491,7 @@ impl StudioApp {
                     perilla(ui, &mut self.settings.reverb_escucha, 0.0, 1.0, 0.0, "Reverb", "Reverberación: tu voz como en una sala · doble clic: sin reverberación");
                 });
             });
+            }
         });
         ui.add_space(4.0);
         ui.label(RichText::new("Lo que grabas se guarda con tu voz natural; si NN Tune está prendido, al terminar se crea además la toma con este efecto (la original queda en «Tomas»).").small().color(DIM));
