@@ -172,7 +172,12 @@ pub struct StudioApp {
     settings: Settings,
     last_version: Instant,
     version_dirty: bool,
-    master_job: Option<(mpsc::Receiver<MasterRes>, usize)>,
+    /// masterizado en curso (y si se lanzó solo); su bandera para cancelarlo; cuándo relanzarlo; volumen final medido
+    master_job: Option<(mpsc::Receiver<MasterRes>, bool)>,
+    mast_cancel: Option<Arc<AtomicBool>>,
+    mast_pendiente: Option<Instant>,
+    /// (LUFS, ganancia del limitador) del último masterizado
+    master_lufs: Option<(f32, f32)>,
     master_target: usize,
     /// mastering estilo BandLab: estilo, intensidad (0 ligero, 1 normal, 2 pesado), graves/medios/agudos
     /// y canción de referencia (nombre, sonoridad, balance de graves/medios/agudos)
@@ -184,6 +189,8 @@ pub struct StudioApp {
     sin_master: bool,
     /// en el teléfono: cuál de los dos paneles se abrió último (el otro se cierra)
     mic_antes_que_mast: bool,
+    /// recortes del micrófono ya vistos y cuándo cambió por última vez (aviso de saturación)
+    recortes_vistos: (u32, f64),
     master_eq3: [f32; 3],
     master_ref: Option<(String, f32, [f32; 3])>,
     scale_snap: bool,
@@ -369,12 +376,16 @@ impl StudioApp {
             last_version: Instant::now(),
             version_dirty: false,
             master_job: None,
+            mast_cancel: None,
+            mast_pendiente: None,
+            master_lufs: None,
             master_target: 0,
             master_estilo: 0,
             master_int: 1.0,
             master_eq_on: false,
             mast_panel: false,
             mic_antes_que_mast: false,
+            recortes_vistos: (0, -100.0),
             sin_master: false,
             master_eq3: [0.0; 3],
             master_ref: None,
@@ -2569,7 +2580,7 @@ impl eframe::App for StudioApp {
             Frame::new().fill(Color32::from_gray(20)).stroke(Stroke::new(1.0, Color32::from_gray(38))).corner_radius(99).inner_margin(Margin::symmetric(14, 4)).show(ui, |ui| self.top_bar(ui, compact));
         });
         egui::Panel::bottom("status").frame(Frame::new().fill(Color32::from_gray(15)).inner_margin(Margin::symmetric(4, 3))).show(ui, |ui| self.status_bar(ui));
-        // en el teléfono el micrófono y el masterizado usan toda la pantalla: uno a la vez
+        // en el teléfono el micrófono usa toda la pantalla y el masterizado va a la derecha: uno a la vez
         // (si quedan los dos abiertos, se cierra el que ya estaba y queda el que acabas de abrir)
         if compact && self.mic_panel && self.mast_panel {
             if self.mic_antes_que_mast {
@@ -2579,10 +2590,13 @@ impl eframe::App for StudioApp {
             }
         }
         self.mic_antes_que_mast = self.mic_panel;
-        // en la PC el masterizado va primero: ocupa todo el alto a la derecha y el micrófono queda abajo, a su lado
-        if !compact {
+        // el masterizado va a la derecha y primero (todo el alto); en la PC el micrófono queda abajo, a su lado
+        {
             let mut ver_mast = self.mast_panel;
-            egui::Panel::right("masterizado").default_size(330.0).min_size(290.0).frame(Frame::new().fill(PANEL).inner_margin(Margin::same(12)).stroke(Stroke::new(1.0, LINE))).show_collapsible(ui, &mut ver_mast, |ui| self.panel_masterizado(ui));
+            let (def, min) = if compact { (300.0, 260.0) } else { (330.0, 290.0) };
+            egui::Panel::right("masterizado").default_size(def).min_size(min).frame(Frame::new().fill(PANEL).inner_margin(Margin::same(if compact { 10 } else { 12 })).stroke(Stroke::new(1.0, LINE))).show_collapsible(ui, &mut ver_mast, |ui| self.panel_masterizado(ui));
+        }
+        if !compact {
             let mut abierto = self.mic_panel;
             egui::Panel::bottom("micro").frame(Frame::new().fill(PANEL).inner_margin(Margin::symmetric(14, 10)).stroke(Stroke::new(1.0, LINE))).show_collapsible(ui, &mut abierto, |ui| {
                 // si no entra a lo ancho, se desliza de lado en vez de montarse
@@ -2614,9 +2628,7 @@ impl eframe::App for StudioApp {
             });
         });
         self.letras_panel = ver_letras && self.letras_panel;
-        if compact && self.mast_panel {
-            egui::CentralPanel::default().frame(Frame::new().fill(PANEL).inner_margin(Margin::symmetric(12, 10))).show(ui, |ui| self.panel_masterizado(ui));
-        } else if compact && self.mic_panel {
+        if compact && self.mic_panel {
             // en el teléfono el micrófono y NN Tune usan toda la pantalla (se desplaza con el dedo)
             egui::CentralPanel::default().frame(Frame::new().fill(PANEL).inner_margin(Margin::symmetric(10, 8))).show(ui, |ui| {
                 egui::ScrollArea::both().id_salt("micro_movil").auto_shrink([false, false]).show(ui, |ui| self.micro_panel(ui));

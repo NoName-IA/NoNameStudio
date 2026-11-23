@@ -293,7 +293,8 @@ pub(super) fn balance_3(a: &[f32], sr: f32) -> [f32; 3] {
 pub(super) fn cadena_master(estilo: usize, int: f32, eq3: [f32; 3]) -> ([Band; 6], CompP) {
     let (_, _, e, ratio) = MASTER_ESTILOS[estilo.min(MASTER_ESTILOS.len() - 1)];
     let int = int.clamp(0.0, 2.0);
-    let k = int_valores(int).1;
+    // los estilos se marcan bastante (como en BandLab): se nota la diferencia al prender y apagar
+    let k = int_valores(int).1 * 1.6;
     let mut eq = default_eq();
     eq[0].on = true;
     eq[0].freq = 28.0;
@@ -2962,10 +2963,23 @@ impl StudioApp {
     }
 
     pub(super) fn start_mastering(&mut self) {
+        self.masterizar(false);
+    }
+
+    /// Masteriza la canción en segundo plano (estilo + volumen final). `auto`: lanzado solo al cambiar algo del panel.
+    /// Si ya había uno en curso, se cancela y empieza de nuevo con los ajustes actuales.
+    pub(super) fn masterizar(&mut self, auto: bool) {
         if self.p.song_bars() == 0 {
-            self.msg = "La playlist está vacía: no hay nada que masterizar.".into();
+            if !auto {
+                self.msg = "La playlist está vacía: no hay nada que masterizar.".into();
+            }
             return;
         }
+        if let Some(c) = &self.mast_cancel {
+            c.store(true, Ordering::Relaxed);
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.mast_cancel = Some(cancel.clone());
         let (tx, rx) = mpsc::channel();
         let mut p = self.p.clone();
         let bank = self.bank();
@@ -2974,7 +2988,7 @@ impl StudioApp {
         let target = referencia.as_ref().map(|r| r.1.clamp(-20.0, -7.0)).unwrap_or(int_valores(int).0);
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
-            let (pr, ca) = (AtomicU32::new(0), AtomicBool::new(false));
+            let pr = AtomicU32::new(0);
             let (mut eq, comp) = cadena_master(estilo, int, eq3);
             p.master_eq = eq;
             p.master_comp = comp;
@@ -2983,7 +2997,10 @@ impl StudioApp {
             let mut lufs = -70.0;
             // con referencia: se mide la mezcla y se corrige su balance hacia el de la referencia
             if let Some((_, _, bal_ref)) = &referencia {
-                let a = crate::engine::render_song(&p, &bank, 44_100.0, &pr, &ca);
+                let a = crate::engine::render_song(&p, &bank, 44_100.0, &pr, &cancel);
+                if cancel.load(Ordering::Relaxed) {
+                    return;
+                }
                 let bal = balance_3(&a, 44_100.0);
                 let d: Vec<f32> = (0..3).map(|k| ((bal_ref[k] - bal[k]) * 0.7).clamp(-4.0, 4.0)).collect();
                 eq = cadena_master(estilo, int, [eq3[0] + d[0], eq3[1] + d[1], eq3[2] + d[2]]).0;
@@ -2991,7 +3008,10 @@ impl StudioApp {
             }
             for _ in 0..3 {
                 p.limiter.gain_db = gain;
-                let a = crate::engine::render_song(&p, &bank, 44_100.0, &pr, &ca);
+                let a = crate::engine::render_song(&p, &bank, 44_100.0, &pr, &cancel);
+                if cancel.load(Ordering::Relaxed) {
+                    return;
+                }
                 let (l, _) = crate::loudness::measure(&a, 44_100.0);
                 lufs = l;
                 if l <= -69.0 {
@@ -2999,7 +3019,7 @@ impl StudioApp {
                     return;
                 }
                 let d = target - l;
-                if d.abs() < 0.3 {
+                if d.abs() < 0.4 {
                     break;
                 }
                 gain = (gain + d).clamp(-12.0, 18.0);
@@ -3009,22 +3029,33 @@ impl StudioApp {
                 c.request_repaint();
             }
         });
-        self.master_job = Some((rx, self.master_estilo));
-        self.msg = "Analizando la canción para masterizar…".into();
+        self.master_job = Some((rx, auto));
+        if !auto {
+            self.msg = "Masterizando la canción…".into();
+        }
     }
 
     pub(super) fn poll_master(&mut self) {
-        let Some((rx, _)) = &self.master_job else { return };
+        let Some((rx, auto)) = &self.master_job else { return };
+        let auto = *auto;
         match rx.try_recv() {
             Ok(r) => {
                 self.master_job = None;
                 match r {
                     Ok((gain, lufs, eq, comp)) => {
-                        self.snap();
+                        // los cambios del panel ya dejaron su punto de deshacer
+                        if !auto {
+                            self.snap();
+                        }
                         self.p.master_eq = eq;
                         self.p.master_comp = comp;
                         self.p.limiter = LimP { on: true, gain_db: gain, ceiling_db: -1.0, release_ms: 60.0 };
-                        self.msg = format!("Masterizado ({}): {:.1} LUFS integrados (limitador +{:.1} dB). Deshacer para volver.", MASTER_ESTILOS[self.master_estilo].0, lufs, gain);
+                        self.master_lufs = Some((lufs, gain));
+                        self.cambios = true;
+                        self.msg = format!("Masterizado «{}»: {:.1} LUFS ({:+.1} dB de volumen).", MASTER_ESTILOS[self.master_estilo].0, lufs, gain);
+                        if self.sin_master {
+                            self.poner_sin_master(false);
+                        }
                         self.send();
                     }
                     Err(e) => self.msg = e,
@@ -3032,8 +3063,8 @@ impl StudioApp {
             }
             Err(mpsc::TryRecvError::Empty) => {}
             Err(_) => {
+                // cancelado porque empezó otro con ajustes nuevos: no se avisa nada
                 self.master_job = None;
-                self.msg = "El análisis terminó sin respuesta.".into();
             }
         }
     }

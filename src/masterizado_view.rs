@@ -102,7 +102,45 @@ fn icono_estilo(p: &egui::Painter, i: usize, c: Pos2, col: Color32) {
     }
 }
 
+/// Nombre de la intensidad (0 = ligero, 1 = normal, 2 = pesado).
+fn nombre_int(x: f32) -> &'static str {
+    if x < 0.5 {
+        "ligero"
+    } else if x < 0.8 {
+        "suave"
+    } else if x <= 1.2 {
+        "normal"
+    } else if x < 1.6 {
+        "fuerte"
+    } else {
+        "pesado"
+    }
+}
+
+/// Brillo de metal que recorre un rectángulo de lado a lado (mientras trabaja).
+fn brillo_recorrido(ui: &mut Ui, r: Rect, radio: u8) {
+    let t = (ui.input(|i| i.time) * 0.55).fract() as f32;
+    let p = ui.painter_at(r);
+    let centro = r.left() - r.width() * 0.3 + t * r.width() * 1.6;
+    let ancho = (r.width() * 0.25).max(30.0);
+    // franja suave: varias capas, más brillante en el centro
+    for k in 0..8 {
+        let f = k as f32 / 8.0;
+        let w = ancho * (1.0 - f);
+        let a = (6.0 + 6.0 * f) as u8;
+        p.rect_filled(Rect::from_min_max(Pos2::new(centro - w * 0.5, r.top()), Pos2::new(centro + w * 0.5, r.bottom())), radio, Color32::from_white_alpha(a));
+    }
+    ui.ctx().request_repaint();
+}
+
 impl StudioApp {
+    /// Volumen final del último masterizado, solo si el master del proyecto sigue siendo ese
+    /// (al abrir otro proyecto, deshacer o quitarlo, deja de mostrarse).
+    pub(super) fn lufs_vigente(&self) -> Option<f32> {
+        let (l, g) = self.master_lufs?;
+        (self.p.limiter.on && (self.p.limiter.gain_db - g).abs() < 0.01).then_some(l)
+    }
+
     /// Aplica al instante el ecualizador y el compresor del estilo elegido (sin medir el volumen).
     pub(super) fn master_en_vivo(&mut self) {
         let eq3 = if self.master_eq_on { self.master_eq3 } else { [0.0; 3] };
@@ -141,27 +179,51 @@ impl StudioApp {
                 self.send();
             }
         }
+        // al rato de dejar de mover algo del panel, se masteriza solo (como BandLab)
+        if let Some(t) = self.mast_pendiente {
+            let espera = std::time::Duration::from_millis(600);
+            if t.elapsed() >= espera {
+                self.mast_pendiente = None;
+                self.masterizar(true);
+            } else {
+                ui.ctx().request_repaint_after(espera - t.elapsed());
+            }
+        }
+        let trabajando = self.master_job.is_some() || self.mast_pendiente.is_some();
         let activo = self.mast_panel;
-        Frame::new()
+        let encendido = !self.sin_master && (self.lufs_vigente().is_some() || trabajando);
+        let marco = Frame::new()
             .fill(if activo { Color32::from_gray(38) } else { Color32::from_gray(28) })
-            .stroke(Stroke::new(1.0, if activo { Color32::from_gray(90) } else { Color32::from_gray(45) }))
+            .stroke(Stroke::new(1.0, if encendido { Color32::from_gray(150) } else if activo { Color32::from_gray(90) } else { Color32::from_gray(45) }))
             .corner_radius(99)
-            .inner_margin(Margin::symmetric(10, 3))
-            .show(ui, |ui| {
+            .inner_margin(Margin::symmetric(10, 3));
+        let marco = marco.show(ui, |ui| {
                 // de derecha a izquierda: interruptor y después el nombre
                 let mut on = !self.sin_master;
                 if interruptor(ui, &mut on).on_hover_text("Escuchar con o sin el masterizado").changed() {
                     self.poner_sin_master(!on);
                 }
-                let (nombre, sub) = (MASTER_ESTILOS[self.master_estilo].0, if self.sin_master { "Sin master" } else { "Masterizado" });
+                let nombre = MASTER_ESTILOS[self.master_estilo].0;
+                let sub = if trabajando {
+                    "Masterizando…".to_string()
+                } else if self.sin_master {
+                    "Sin master".to_string()
+                } else if let Some(l) = self.lufs_vigente() {
+                    format!("Listo · {l:.0} LUFS")
+                } else {
+                    "Elige un estilo".to_string()
+                };
                 let (r, resp) = ui.allocate_exact_size(Vec2::new(if compact { 74.0 } else { 92.0 }, 26.0), Sense::click());
                 let p = ui.painter();
                 p.text(r.left_top() + Vec2::new(0.0, 1.0), Align2::LEFT_TOP, nombre, FontId::proportional(12.5), Color32::WHITE);
-                p.text(r.left_bottom() + Vec2::new(0.0, -1.0), Align2::LEFT_BOTTOM, sub, FontId::proportional(10.0), DIM);
+                p.text(r.left_bottom() + Vec2::new(0.0, -1.0), Align2::LEFT_BOTTOM, sub, FontId::proportional(10.0), if trabajando { Color32::from_gray(210) } else { DIM });
                 if resp.on_hover_text("Abrir el masterizado").clicked() {
                     self.mast_panel = !self.mast_panel;
                 }
             });
+        if trabajando {
+            brillo_recorrido(ui, marco.response.rect, 99);
+        }
     }
 
     /// Panel derecho «Masterizando».
@@ -335,23 +397,54 @@ impl StudioApp {
                 });
             });
             ui.add_space(12.0);
-            // ---------- aplicar
-            if self.master_job.is_some() {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("Analizando la canción…");
-                });
-            } else {
-                let w = ui.available_width();
-                if boton_metal(ui, "Aplicar y ajustar el volumen", Vec2::new(w, 38.0)).on_hover_text("Mide la canción y deja el volumen final listo para publicar").clicked() {
-                    self.start_mastering();
+            // ---------- estado del masterizado
+            let trabajando = self.master_job.is_some() || self.mast_pendiente.is_some();
+            let w = ui.available_width();
+            let tarjeta = Frame::new().fill(PANEL2).corner_radius(10).inner_margin(Margin::same(12)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                if trabajando {
+                    ui.label(RichText::new("Masterizando tu canción…").strong());
+                    ui.label(RichText::new(format!("Estilo «{}» · {}", MASTER_ESTILOS[self.master_estilo].0, nombre_int(self.master_int))).small().color(DIM));
+                    // barra que corre mientras trabaja
+                    let (r, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 6.0), Sense::hover());
+                    let p = ui.painter();
+                    p.rect_filled(r, 99, Color32::from_gray(45));
+                    let t = (ui.input(|i| i.time) * 0.8).fract() as f32;
+                    let a = r.left() + (t * 1.4 - 0.4) * r.width();
+                    let seg = Rect::from_min_max(Pos2::new(a.max(r.left()), r.top()), Pos2::new((a + r.width() * 0.4).min(r.right()), r.bottom()));
+                    if seg.width() > 0.0 {
+                        p.rect_filled(seg, 99, ACCENT);
+                    }
+                    ui.ctx().request_repaint();
+                } else if let (Some(l), false) = (self.lufs_vigente(), self.sin_master) {
+                    ui.label(RichText::new("Canción masterizada").strong().color(GREEN));
+                    ui.label(RichText::new(format!("Estilo «{}» · {} · volumen final {l:.1} LUFS", MASTER_ESTILOS[self.master_estilo].0, nombre_int(self.master_int))).small().color(DIM));
+                } else if self.sin_master && self.lufs_vigente().is_some() {
+                    ui.label(RichText::new("Escuchando sin master").strong());
+                    ui.label(RichText::new("Prende el interruptor para volver a escuchar el masterizado.").small().color(DIM));
+                } else {
+                    ui.label(RichText::new("Elige un estilo para masterizar").strong());
+                    ui.label(RichText::new("Se masteriza solo: estilo, fuerza y volumen final listos para publicar.").small().color(DIM));
                 }
+            });
+            if trabajando {
+                brillo_recorrido(ui, tarjeta.response.rect, 10);
+            }
+            ui.add_space(8.0);
+            if !trabajando && boton_metal(ui, if self.lufs_vigente().is_some() { "Volver a masterizar" } else { "Masterizar" }, Vec2::new(w, 38.0)).on_hover_text("Mide la canción y deja el volumen final listo para publicar").clicked() {
+                self.start_mastering();
             }
             ui.add_space(4.0);
-            ui.label(RichText::new("El estilo, la intensidad y el ecualizador se escuchan al instante. «Aplicar» además ajusta el volumen final (y copia la referencia, si elegiste una).").small().color(DIM));
+            ui.label(RichText::new("Cada cambio de estilo, intensidad o ecualizador se escucha al instante y en un momento la canción queda masterizada con su volumen final.").small().color(DIM));
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 if ui.small_button("Quitar masterizado").clicked() {
+                    if let Some(c) = &self.mast_cancel {
+                        c.store(true, Ordering::Relaxed);
+                    }
+                    self.master_job = None;
+                    self.mast_pendiente = None;
+                    self.master_lufs = None;
                     self.snap();
                     self.p.master_eq = default_eq();
                     self.p.master_comp = CompP::master();
@@ -369,6 +462,8 @@ impl StudioApp {
                 self.poner_sin_master(false);
             }
             self.master_en_vivo();
+            // en un momento se masteriza completo (volumen incluido)
+            self.mast_pendiente = Some(std::time::Instant::now());
         }
     }
 }

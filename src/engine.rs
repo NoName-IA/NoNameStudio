@@ -17,6 +17,8 @@ const LOOKAHEAD: f64 = 256.0;
 
 /// Lo que entra por el micrófono, para escucharse mientras se graba.
 pub struct Monitor {
+    /// muestras que llegan del micrófono ya recortadas (al máximo): el micrófono entra demasiado fuerte
+    pub recortes: AtomicU32,
     pub cola: std::sync::Mutex<std::collections::VecDeque<f32>>,
     pub sr: AtomicU32,
     pub on: AtomicBool,
@@ -101,6 +103,7 @@ impl Status {
             audio_caido: AtomicBool::new(false),
             mic_caido: AtomicBool::new(false),
             monitor: Monitor {
+                recortes: AtomicU32::new(0),
                 cola: std::sync::Mutex::new(std::collections::VecDeque::with_capacity(48_000)),
                 sr: AtomicU32::new(48_000),
                 on: AtomicBool::new(false),
@@ -290,6 +293,9 @@ pub struct Engine {
     /// nivelador de la voz (envolvente y ganancia) y reverberación de la escucha
     mon_env: f32,
     mon_agc: f32,
+    /// pico reciente de la voz y ganancia del limitador de la escucha
+    mon_pico: f32,
+    mon_lim: f32,
     mon_verb: crate::fx::Verb,
     /// última nota tocada en cada canal (para el glide del sintetizador)
     ultima_nota: Vec<f32>,
@@ -364,6 +370,8 @@ impl Engine {
             mon_tune_on: false,
             mon_env: 0.0,
             mon_agc: 1.0,
+            mon_pico: 0.0,
+            mon_lim: 1.0,
             mon_verb: crate::fx::Verb::new(sr),
             reposo: 0,
             precuenta: 0,
@@ -995,6 +1003,9 @@ impl Engine {
         let rel_env = 1.0 - (-1.0 / (0.25 * sr)).exp();
         let at_agc = 1.0 - (-1.0 / (0.01 * sr)).exp();
         let rel_agc = 1.0 - (-1.0 / (0.4 * sr)).exp();
+        let rel_pico = 1.0 - (-1.0 / (0.15 * sr)).exp();
+        let rel_lim = 1.0 - (-1.0 / (0.08 * sr)).exp();
+        let mut recortes = 0u32;
         let pan = f32::from_bits(m.pan.load(Ordering::Relaxed)).clamp(-1.0, 1.0);
         let ang = (pan + 1.0) * std::f32::consts::FRAC_PI_4;
         let (pl, pr) = (ang.cos() * std::f32::consts::SQRT_2, ang.sin() * std::f32::consts::SQRT_2);
@@ -1012,22 +1023,35 @@ impl Engine {
             } else {
                 self.mon_tune.escuchar(v, &tp);
             }
-            // nivelador: sube la voz a un nivel fuerte y parejo (no sube el ruido de cuando no cantas)
+            // nivelador: sube la voz bajita (hasta 4 veces) y baja la fuerte; no sube el ruido del micrófono
+            // y nunca deja que los picos pasen del 75 % (así no satura un micrófono externo que ya llega fuerte)
             let a = v.abs();
+            if a >= 0.98 {
+                recortes += 1;
+            }
             self.mon_env += (a - self.mon_env) * if a > self.mon_env { at_env } else { rel_env };
-            let deseo = if self.mon_env > 0.004 { (0.42 / self.mon_env).clamp(1.0, 8.0) } else { 1.0 };
+            self.mon_pico = if a > self.mon_pico { a } else { self.mon_pico + (a - self.mon_pico) * rel_pico };
+            let tope = 0.75 / self.mon_pico.max(1e-4);
+            let deseo = if self.mon_env > 0.012 { (0.42 / self.mon_env).min(tope).clamp(0.25, 4.0) } else { tope.min(1.0) };
             self.mon_agc += (deseo - self.mon_agc) * if deseo < self.mon_agc { at_agc } else { rel_agc };
             let v = v * self.mon_agc * gain;
             let (rl, rr) = if verb_ret > 0.001 { self.mon_verb.run(v, &vp) } else { (0.0, 0.0) };
-            let lim = |x: f32| {
-                let a = x.abs();
-                if a < 0.8 { x } else { x.signum() * (0.8 + 0.2 * ((a - 0.8) / 0.2).tanh()) }
-            };
-            out[f * 2] += lim(v * pl + rl);
-            out[f * 2 + 1] += lim(v * pr + rr);
+            // limitador limpio: baja el volumen al instante en vez de deformar la onda
+            let (l, r) = (v * pl + rl, v * pr + rr);
+            let pico = l.abs().max(r.abs()) * self.mon_lim;
+            if pico > 0.85 {
+                self.mon_lim *= 0.85 / pico;
+            } else {
+                self.mon_lim += (1.0 - self.mon_lim) * rel_lim;
+            }
+            out[f * 2] += l * self.mon_lim;
+            out[f * 2 + 1] += r * self.mon_lim;
         }
         self.mon_last = self.mon_buf[take];
         self.mon_frac = fin - take as f64;
+        if recortes > 0 {
+            m.recortes.fetch_add(recortes, Ordering::Relaxed);
+        }
         m.cantada.store(self.mon_tune.cantada.to_bits(), Ordering::Relaxed);
         m.objetivo.store((self.mon_tune.objetivo + 1).max(0) as u32, Ordering::Relaxed);
     }

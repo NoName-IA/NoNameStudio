@@ -166,6 +166,16 @@ impl StudioApp {
                     self.settings.escucharme = !on;
                 }
                 ui.label(RichText::new("Usa audífonos: con parlantes se produce un pitido fuerte.").small().color(DIM));
+                // aviso si el micrófono llega recortado (ya saturado antes de entrar a la app)
+                let rec = self.status.monitor.recortes.load(Ordering::Relaxed);
+                let ahora = ui.input(|i| i.time);
+                if rec != self.recortes_vistos.0 {
+                    self.recortes_vistos = (rec, ahora);
+                }
+                if rec > 0 && ahora - self.recortes_vistos.1 < 3.0 {
+                    ui.label(RichText::new("Tu micrófono llega saturado: aléjalo un poco de la boca o bájale el volumen (si tiene perilla). Eso no se puede arreglar después.").small().color(RED));
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+                }
                 ui.add_space(6.0);
                 let mut niv = self.settings.nivelar_grabacion;
                 if ui.checkbox(&mut niv, "Grabar con el volumen nivelado").on_hover_text("La toma queda tan fuerte y pareja como te escuchas (si lo apagas, se graba tal cual llega del micrófono)").changed() {
