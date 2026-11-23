@@ -22,10 +22,116 @@ pub(super) struct Settings {
     pub midi_port: String,
     /// cuantizar lo que se graba con el teclado MIDI
     pub midi_quant: bool,
+    /// ya vio (o saltó) el tutorial de bienvenida
+    pub tutorial_done: bool,
+    // ---- general
+    /// abrir el último proyecto al iniciar (si no, siempre empieza uno nuevo)
+    pub abrir_ultimo: bool,
+    /// guardar solo cada tantos minutos (0 = nunca)
+    pub autoguardar_min: u32,
+    /// guardar copias de respaldo (versiones)
+    pub versiones: bool,
+    /// preguntar antes de cerrar o reemplazar un proyecto con cambios sin guardar
+    pub preguntar: bool,
+    /// plantilla y tempo de los proyectos nuevos
+    pub plantilla_nueva: usize,
+    pub bpm_nuevo: f32,
+    // ---- audio
+    /// salida y entrada de audio ("" = las de Windows)
+    pub salida: String,
+    pub entrada: String,
+    /// tamaño de bloque del audio (0 = automático)
+    pub buffer: u32,
+    /// metrónomo mientras se graba
+    pub metro_grabar: bool,
+    /// escucharse por el micrófono (se apaga al cerrar el programa)
+    #[serde(skip)]
+    pub escucharme: bool,
+    pub vol_escucha: f32,
+    /// canal de la entrada que se graba (0 = mezcla de todos)
+    #[serde(default)]
+    pub canal_entrada: u8,
+    /// la voz grabada pasa por el mismo nivelador que cuando te escuchas
+    pub nivelar_grabacion: bool,
+    /// paneo y reverberación de la voz que te escuchas; ajustes avanzados de NN Tune a la vista
+    #[serde(default)]
+    pub pan_escucha: f32,
+    #[serde(default)]
+    pub reverb_escucha: f32,
+    #[serde(default)]
+    pub tune_avanzado: bool,
+    /// autotune en vivo al escucharse
+    pub tune_vivo: bool,
+    /// intensidad del autotune (0 = suave, 1 = lo más intenso)
+    pub tune_int: f32,
+    /// tónica y escala del autotune (255 = las de la canción) y estilo
+    pub tune_tonica: u8,
+    pub tune_escala: u8,
+    pub tune_estilo: u8,
+    /// el autotune sigue los acordes de la canción
+    pub tune_acordes: bool,
+    /// categoría de estilos a la vista, algoritmo (0 limpio, 1 baja demora) y volumen de la armonía
+    pub tune_categoria: u8,
+    pub tune_alg: u8,
+    pub tune_mezcla: f32,
+    // ---- exportar
+    /// carpeta de exportación ("" = Escritorio)
+    pub export_dir: String,
+    pub mp3_kbps: u32,
+    pub wav_bits: u16,
+    pub sr_export: u32,
+    /// 0 = automático, 1 = siempre, 2 = nunca
+    pub normalizar: u8,
+    // ---- pantalla
+    /// tamaño de la interfaz (1 = normal)
+    pub zoom: f32,
+    /// mostrar textos de ayuda
+    pub ayudas: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
-        Settings { latency_ms: 20.0, version_min: 5, plugin_dirs: vec![], fav_dirs: vec![], midi_port: String::new(), midi_quant: true }
+        Settings {
+            latency_ms: 20.0,
+            version_min: 5,
+            plugin_dirs: vec![],
+            fav_dirs: vec![],
+            midi_port: String::new(),
+            midi_quant: true,
+            tutorial_done: false,
+            abrir_ultimo: false,
+            autoguardar_min: 0,
+            versiones: false,
+            preguntar: true,
+            plantilla_nueva: 0,
+            bpm_nuevo: 120.0,
+            salida: String::new(),
+            entrada: String::new(),
+            buffer: 0,
+            metro_grabar: true,
+            escucharme: false,
+            vol_escucha: 0.5,
+            canal_entrada: 0,
+            nivelar_grabacion: true,
+            pan_escucha: 0.0,
+            reverb_escucha: 0.0,
+            tune_avanzado: false,
+            tune_vivo: false,
+            tune_int: 0.5,
+            tune_tonica: 255,
+            tune_escala: 255,
+            tune_estilo: 0,
+            tune_acordes: false,
+            tune_categoria: 0,
+            tune_alg: 0,
+            tune_mezcla: 1.0,
+            export_dir: String::new(),
+            mp3_kbps: 320,
+            wav_bits: 16,
+            sr_export: 44_100,
+            normalizar: 0,
+            zoom: 1.0,
+            ayudas: true,
+        }
     }
 }
 
@@ -73,14 +179,104 @@ pub(super) struct TrackRec {
     pub region: Option<(u32, u32)>,
     pub looped: bool,
     pub started: Instant,
+    /// carril de la playlist donde se dibuja y se guardan las tomas
+    pub track: u32,
 }
 
 pub(super) enum FileMsg {
+    /// análisis del Retune de un clip
+    Retune(u32, Result<super::retune_view::Retune, String>),
+    /// voz calculada con los cambios del Retune (clip, clave de los cambios, audio)
+    RetuneListo(u32, u64, Vec<f32>),
+    /// armonía lista: (clip de origen, nombre de la armonía, archivo nuevo y audio)
+    Armonia(u32, String, Result<(String, Buf), String>),
     Built(String, Result<Buf, String>),
     Preview(Result<Buf, String>),
+    /// toma afinada con NN Tune para un clip: (clip, nombre del archivo nuevo, audio)
+    Afinado(u32, Result<(String, Buf), String>),
 }
 
-pub(super) type MasterRes = Result<(f32, f32, f32), String>;
+pub(super) type MasterRes = Result<(f32, f32, [Band; 6], CompP), String>;
+
+/// Cadenas de efectos para voz (como los presets de «Efectos» de BandLab):
+/// nombre, ayuda, corte de graves (Hz, 0 = apagado), corte de agudos (Hz, 0 = apagado),
+/// (450 Hz, 2,2 kHz, agudos) en dB, (umbral, razón, ganancia) del compresor, reverb, delay, espacio.
+pub(super) const VOZ_FX: [(&str, &str, f32, f32, [f32; 3], (f32, f32, f32), f32, f32, f32); 8] = [
+    ("Ninguno", "Sin efectos: la voz tal cual", 0.0, 0.0, [0.0, 0.0, 0.0], (0.0, 1.0, 0.0), 0.0, 0.0, 0.0),
+    ("Voz limpia", "Clara y pareja, lista para cualquier género", 90.0, 0.0, [-2.0, 2.0, 2.5], (-20.0, 3.0, 3.0), 0.12, 0.0, 0.0),
+    ("Rap al frente", "Seca, fuerte y con presencia", 100.0, 0.0, [-3.0, 3.5, 3.0], (-24.0, 4.0, 5.0), 0.05, 0.08, 0.0),
+    ("Trap brillante", "Brillo arriba, reverb y delay cortos", 110.0, 0.0, [-2.0, 3.0, 5.0], (-22.0, 4.0, 4.0), 0.18, 0.15, 0.0),
+    ("Balada", "Suave, cálida y con sala", 80.0, 0.0, [-1.0, 1.0, 2.0], (-18.0, 2.5, 2.0), 0.35, 0.1, 0.0),
+    ("Reggaetón", "Al frente con delay rítmico", 100.0, 0.0, [-2.5, 3.0, 3.5], (-22.0, 3.5, 4.0), 0.12, 0.22, 0.0),
+    ("Radio", "Sonido de radio o teléfono", 500.0, 3500.0, [0.0, 4.0, 0.0], (-20.0, 4.0, 4.0), 0.0, 0.0, 0.0),
+    ("Ambiente amplio", "Voz grande y espacial", 90.0, 0.0, [-1.5, 1.5, 3.0], (-20.0, 3.0, 3.0), 0.45, 0.25, 0.3),
+];
+
+/// Aplica una cadena de efectos de voz a un canal.
+pub(super) fn aplicar_voz_fx(c: &mut Channel, i: usize) {
+    let (_, _, lc, hc, eq, (thr, ratio, mk), rev, dly, space) = VOZ_FX[i.min(VOZ_FX.len() - 1)];
+    c.eq = default_eq();
+    if lc > 0.0 {
+        c.eq[0].on = true;
+        c.eq[0].freq = lc;
+    }
+    if hc > 0.0 {
+        c.eq[5].on = true;
+        c.eq[5].freq = hc;
+    }
+    c.eq[2].gain = eq[0];
+    c.eq[3].gain = eq[1];
+    c.eq[4].gain = eq[2];
+    c.comp = CompP { on: i > 0, threshold: thr, ratio, attack_ms: 8.0, release_ms: 120.0, makeup: mk, sc: 0 };
+    c.rev = rev;
+    c.dly = dly;
+    c.space = space;
+}
+
+/// Estilos de mastering: nombre, descripción, (graves, medios, presencia, agudos) en dB y razón del compresor.
+pub(super) const MASTER_ESTILOS: [(&str, &str, [f32; 4], f32); 4] = [
+    ("Universal", "Equilibrado para cualquier género", [0.6, 0.0, 0.3, 0.9], 2.0),
+    ("Fuego", "Graves gordos y mucha pegada (trap, reggaetón, drill)", [2.6, -1.0, 0.6, 1.6], 3.0),
+    ("Claridad", "Voces al frente, limpio y brillante", [-0.4, -1.5, 1.6, 2.0], 2.2),
+    ("Cinta", "Cálido y suave, como en una cinta analógica", [1.2, 0.6, -0.4, -2.2], 1.7),
+];
+/// Intensidad del mastering: nombre, sonoridad objetivo (LUFS) y cuánto se marca el estilo.
+pub(super) const MASTER_INT: [(&str, f32, f32); 3] = [("Ligero", -16.0, 0.6), ("Normal", -13.0, 1.0), ("Pesado", -9.5, 1.3)];
+
+/// Balance de graves (< 250 Hz), medios y agudos (> 4 kHz) de un audio estéreo, en dB respecto al total.
+pub(super) fn balance_3(a: &[f32], sr: f32) -> [f32; 3] {
+    let k_lo = 1.0 - (-std::f32::consts::TAU * 250.0 / sr).exp();
+    let k_hi = 1.0 - (-std::f32::consts::TAU * 4000.0 / sr).exp();
+    let (mut lo, mut lp4) = (0.0f32, 0.0f32);
+    let (mut e_lo, mut e_mid, mut e_hi) = (1e-9f64, 1e-9f64, 1e-9f64);
+    for f in a.chunks(2) {
+        let x = (f[0] + f.get(1).copied().unwrap_or(f[0])) * 0.5;
+        lo += (x - lo) * k_lo;
+        lp4 += (x - lp4) * k_hi;
+        let hi = x - lp4;
+        let mid = lp4 - lo;
+        e_lo += (lo * lo) as f64;
+        e_mid += (mid * mid) as f64;
+        e_hi += (hi * hi) as f64;
+    }
+    let t = e_lo + e_mid + e_hi;
+    [(10.0 * (e_lo / t).log10()) as f32, (10.0 * (e_mid / t).log10()) as f32, (10.0 * (e_hi / t).log10()) as f32]
+}
+
+/// Ecualizador y compresor del master para un estilo, intensidad y ajustes (graves/medios/agudos en dB).
+pub(super) fn cadena_master(estilo: usize, int: usize, eq3: [f32; 3]) -> ([Band; 6], CompP) {
+    let (_, _, e, ratio) = MASTER_ESTILOS[estilo.min(MASTER_ESTILOS.len() - 1)];
+    let k = MASTER_INT[int.min(2)].2;
+    let mut eq = default_eq();
+    eq[0].on = true;
+    eq[0].freq = 28.0;
+    eq[1].gain = (e[0] * k + eq3[0]).clamp(-9.0, 9.0);
+    eq[2].gain = (e[1] * k + eq3[1] * 0.6).clamp(-9.0, 9.0);
+    eq[3].gain = (e[2] * k + eq3[1] * 0.4).clamp(-9.0, 9.0);
+    eq[4].gain = (e[3] * k + eq3[2]).clamp(-9.0, 9.0);
+    let comp = CompP { on: true, threshold: -16.0 - 2.0 * int as f32, ratio: ratio * (0.85 + 0.15 * int as f32), attack_ms: if estilo == 3 { 30.0 } else { 20.0 }, release_ms: 180.0, makeup: 0.0, sc: 0 };
+    (eq, comp)
+}
 
 pub(super) const MASTER_TARGETS: [(&str, f32); 4] = [("Streaming (-14 LUFS)", -14.0), ("Fuerte / club (-9 LUFS)", -9.0), ("Dinámico (-16 LUFS)", -16.0), ("Lo-fi cálido (-12 LUFS)", -12.0)];
 
@@ -164,6 +360,57 @@ impl StudioApp {
                         }
                     }
                 }
+                FileMsg::Afinado(id, r) => match r {
+                    Ok((name, b)) => {
+                        let b = Arc::new(b);
+                        self.wave_peaks.insert(name.clone(), (Arc::new(b.peaks(4000)), b.secs()));
+                        self.files.insert(name.clone(), b.clone());
+                        self.cmd(Cmd::File { key: name.clone(), buf: Some(b) });
+                        self.edit_clip(id, |c| {
+                            c.takes.push(name);
+                            c.active = c.takes.len() - 1;
+                        });
+                        self.msg = "Listo: la voz quedó afinada como una toma nueva. La original sigue en el menú «Tomas» del clip.".into();
+                    }
+                    Err(e) => self.msg = format!("No se pudo afinar: {e}"),
+                },
+                FileMsg::Retune(id, r) => {
+                    // un análisis viejo (se pidió otro clip mientras tanto) no reemplaza al que se espera
+                    if self.retune_cargando != Some(id) {
+                        continue;
+                    }
+                    self.retune_cargando = None;
+                    match r {
+                        Ok(rt) => {
+                            self.msg = format!("Retune: {} notas encontradas. Arrástralas para cambiarlas.", rt.notas.len());
+                            self.retune = Some(rt);
+                        }
+                        Err(e) => self.msg = format!("No se pudo analizar la voz: {e}"),
+                    }
+                }
+                FileMsg::RetuneListo(id, clave, data) => self.retune_listo(id, clave, data),
+                FileMsg::Armonia(id, que, r) => match r {
+                    Ok((name, b)) => {
+                        let b = Arc::new(b);
+                        self.wave_peaks.insert(name.clone(), (Arc::new(b.peaks(4000)), b.secs()));
+                        self.files.insert(name.clone(), b.clone());
+                        self.cmd(Cmd::File { key: name.clone(), buf: Some(b) });
+                        if let Some(c) = self.p.audio_clip(id).cloned() {
+                            self.snap();
+                            let track = self.free_track(c.start, c.len);
+                            self.ensure_tracks(track + 1);
+                            let nid = self.p.new_id();
+                            // la armonía va un poco más baja que la voz principal
+                            self.p.audio_clips.push(AudioClip { id: nid, track, takes: vec![name], active: 0, gain: c.gain * 0.7, ..c });
+                            if (track as usize) < self.p.tracks.len() && self.p.tracks[track as usize].starts_with("Pista ") {
+                                self.p.tracks[track as usize] = format!("Armonía ({que})");
+                            }
+                            self.msg = format!("Armonía ({que}) creada en la pista {}. Ábrela en «Retune» para ajustar notas sueltas.", track + 1);
+                            self.send();
+                        }
+                    }
+                    Err(e) => self.msg = format!("No se pudo crear la armonía: {e}"),
+                },
                 FileMsg::Preview(r) => match r {
                     Ok(b) => self.cmd(Cmd::PreviewFile(Some(Arc::new(b)))),
                     Err(e) => self.msg = format!("No se puede escuchar: {e}"),
@@ -504,7 +751,7 @@ impl StudioApp {
     /// (paso, pista) bajo una posición de pantalla de la playlist.
     pub(super) fn pl_cell(&self, p: Pos2) -> (u32, u32) {
         let org = self.pl_org;
-        let step = (((p.x - org.x) / BW * STEPS_PER_BAR as f32).max(0.0)) as u32;
+        let step = (((p.x - org.x) / self.pl_bw * STEPS_PER_BAR as f32).max(0.0)) as u32;
         let step = step / self.snap_steps.max(1) * self.snap_steps.max(1);
         let tr = (((p.y - org.y) / TH).floor().max(0.0) as u32).min(self.p.tracks.len().saturating_sub(1) as u32);
         (step, tr)
@@ -548,11 +795,11 @@ impl StudioApp {
                 self.p.punch = !pn;
                 self.send();
             }
-            if ui.button("+ Pista").clicked() {
-                self.snap();
-                let n = self.p.tracks.len() as u32 + 1;
-                self.ensure_tracks(n);
-                self.send();
+            if ui.button("Alejar").on_hover_text("Ver más compases (Ctrl + rueda)").clicked() {
+                self.pl_bw = (self.pl_bw / 1.3).max(16.0);
+            }
+            if ui.button("Acercar").on_hover_text("Ver los compases más anchos (Ctrl + rueda)").clicked() {
+                self.pl_bw = (self.pl_bw * 1.3).min(240.0);
             }
             if ui.button("Importar audio…").clicked() {
                 if let Some(p) = self.pick_audio() {
@@ -562,35 +809,175 @@ impl StudioApp {
                     self.left_tab = 1;
                 }
             }
-            ui.label(RichText::new("Clic: patrón · arrastrar: mover · borde: largo · clic derecho: menú · regla: tocar / arrastrar: bucle").small().color(DIM));
+            if self.settings.ayudas {
+                ui.label(RichText::new("Clic: patrón · arrastrar: mover · borde: largo · clic derecho: menú · regla: tocar / arrastrar: bucle").small().color(DIM));
+            }
         });
     }
 
+    /// Cabeceras de las pistas (número, nombre, M, S, volumen y paneo) y la esquina «+ Añadir pista».
+    fn cabeceras_pista(&mut self, ui: &mut Ui, rect: Rect, org: Pos2, tn: f32, rul: f32) {
+        let clip = ui.clip_rect().intersect(rect);
+        let hx = clip.left().max(rect.left());
+        let hp = ui.painter().with_clip_rect(clip);
+        let ntr = self.p.tracks.len();
+        let solo_alguna = self.p.pistas.iter().any(|p| p.solo);
+        let mut cambio = false;
+        let ambar = Color32::from_rgb(248, 198, 62);
+        for t in 0..ntr {
+            let y0 = org.y + t as f32 * TH;
+            let hr = Rect::from_min_size(Pos2::new(hx, y0), Vec2::new(tn, TH));
+            if !clip.intersects(hr) {
+                continue;
+            }
+            let fondo = ui.interact(hr, ui.id().with(("pista_cab", t)), Sense::click());
+            let pista = self.p.pista(t);
+            let suena = !(pista.mute || (solo_alguna && !pista.solo));
+            if !suena {
+                // la pista no suena: su carril se ve apagado
+                let carril = Rect::from_min_size(Pos2::new(org.x, y0), Vec2::new(rect.right() - org.x, TH));
+                hp.rect_filled(carril, 0, Color32::from_black_alpha(90));
+            }
+            hp.rect_filled(hr, 0, if fondo.hovered() { Color32::from_rgb(29, 31, 36) } else { Color32::from_rgb(23, 25, 29) });
+            hp.hline(hr.x_range(), hr.bottom() - 0.5, Stroke::new(1.0, Color32::from_rgb(13, 14, 17)));
+            hp.vline(hr.right() - 0.5, hr.y_range(), Stroke::new(1.0, Color32::from_rgb(13, 14, 17)));
+            // color de la pista: el de su primer clip
+            let tiene_audio = self.p.audio_clips.iter().any(|c| c.track as usize == t);
+            let col = self.p.playlist.iter().find(|c| c.track as usize == t).and_then(|c| self.p.pattern(c.pat)).map(|p| c32(p.color)).unwrap_or(if tiene_audio { ACCENT } else { Color32::from_rgb(70, 74, 84) });
+            hp.rect_filled(Rect::from_min_size(hr.min, Vec2::new(3.0, TH)), 0, if suena { col } else { col.gamma_multiply(0.4) });
+            // ícono: micrófono (audio) o nota (patrones)
+            let ic = Pos2::new(hr.left() + 17.0, y0 + 19.0);
+            let tinta = if suena { ACCENT2 } else { DIM };
+            if tiene_audio {
+                hp.rect_filled(Rect::from_center_size(ic - Vec2::new(0.0, 2.0), Vec2::new(6.0, 10.0)), 3, tinta);
+                hp.add(egui::Shape::line((0..=10).map(|i| {
+                    let a = std::f32::consts::PI * i as f32 / 10.0;
+                    ic + Vec2::new(-a.cos() * 5.5, a.sin() * 5.0)
+                }).collect(), Stroke::new(1.3, tinta)));
+                hp.line_segment([ic + Vec2::new(0.0, 5.0), ic + Vec2::new(0.0, 8.0)], Stroke::new(1.3, tinta));
+            } else {
+                hp.circle_filled(ic + Vec2::new(-2.0, 4.0), 3.2, tinta);
+                hp.line_segment([ic + Vec2::new(1.0, 4.0), ic + Vec2::new(1.0, -7.0)], Stroke::new(1.5, tinta));
+                hp.line_segment([ic + Vec2::new(1.0, -7.0), ic + Vec2::new(5.5, -4.5)], Stroke::new(1.5, tinta));
+            }
+            // número y nombre
+            let nombre_r = Rect::from_min_max(Pos2::new(hr.left() + 30.0, y0 + 8.0), Pos2::new(hr.right() - 66.0, y0 + 30.0));
+            hp.with_clip_rect(nombre_r.intersect(clip)).text(Pos2::new(nombre_r.left(), nombre_r.center().y), Align2::LEFT_CENTER, format!("{:02}  {}", t + 1, self.p.tracks[t]), FontId::proportional(12.5), if suena { Color32::WHITE } else { DIM });
+            // M y S
+            for k in 0..2 {
+                let r = Rect::from_min_size(Pos2::new(hr.right() - 60.0 + k as f32 * 27.0, y0 + 9.0), Vec2::new(23.0, 20.0));
+                let on = if k == 0 { pista.mute } else { pista.solo };
+                let rr = ui.interact(r, ui.id().with(("pista_ms", t, k)), Sense::click());
+                let base = if rr.hovered() { Color32::from_rgb(56, 59, 67) } else { Color32::from_rgb(40, 42, 48) };
+                hp.rect_filled(r, 5, if on { if k == 0 { ambar } else { ACCENT } } else { base });
+                hp.text(r.center(), Align2::CENTER_CENTER, if k == 0 { "M" } else { "S" }, FontId::proportional(11.5), if on { Color32::from_rgb(15, 16, 19) } else { Color32::WHITE });
+                if rr.on_hover_text(if k == 0 { "Silenciar la pista" } else { "Solo: escuchar solo esta pista" }).clicked() {
+                    self.snap();
+                    let p = self.p.pista_mut(t);
+                    if k == 0 {
+                        p.mute = !p.mute;
+                    } else {
+                        p.solo = !p.solo;
+                    }
+                    cambio = true;
+                }
+            }
+            // volumen: riel con perilla blanca
+            let vr = Rect::from_min_size(Pos2::new(hr.left() + 16.0, y0 + TH - 28.0), Vec2::new(tn - 90.0, 18.0));
+            let vresp = ui.interact(vr, ui.id().with(("pista_vol", t)), Sense::click_and_drag());
+            let maxv = 1.5f32;
+            if vresp.drag_started() || vresp.clicked() {
+                self.snap();
+            }
+            if vresp.dragged() || vresp.clicked() {
+                if let Some(pp) = vresp.interact_pointer_pos() {
+                    self.p.pista_mut(t).vol = ((pp.x - vr.left()) / vr.width() * maxv).clamp(0.0, maxv);
+                    cambio = true;
+                }
+            }
+            if vresp.double_clicked() {
+                self.p.pista_mut(t).vol = 1.0;
+                cambio = true;
+            }
+            let vol = self.p.pista(t).vol;
+            let cy = vr.center().y;
+            let xk = vr.left() + vol / maxv * vr.width();
+            hp.line_segment([Pos2::new(vr.left(), cy), Pos2::new(vr.right(), cy)], Stroke::new(3.0, Color32::from_rgb(48, 51, 58)));
+            hp.line_segment([Pos2::new(vr.left(), cy), Pos2::new(xk, cy)], Stroke::new(3.0, if suena { ACCENT } else { DIM }));
+            hp.circle_filled(Pos2::new(xk, cy), if vresp.hovered() || vresp.dragged() { 7.0 } else { 6.0 }, Color32::WHITE);
+            let db = if vol > 0.0001 { format!("{:+.1} dB", 20.0 * vol.log10()) } else { "-∞".into() };
+            vresp.on_hover_text(format!("Volumen de la pista: {db} · doble clic: 0 dB"));
+            // paneo: perilla blanca con L y R
+            let pc = Pos2::new(hr.right() - 32.0, y0 + TH - 22.0);
+            let pr = Rect::from_center_size(pc, Vec2::new(28.0, 28.0));
+            let presp = ui.interact(pr, ui.id().with(("pista_pan", t)), Sense::click_and_drag());
+            if presp.drag_started() {
+                self.snap();
+            }
+            if presp.dragged() {
+                let d = presp.drag_delta();
+                let p = self.p.pista_mut(t);
+                p.pan = (p.pan + (d.x - d.y) / 90.0).clamp(-1.0, 1.0);
+                cambio = true;
+            }
+            if presp.double_clicked() {
+                self.p.pista_mut(t).pan = 0.0;
+                cambio = true;
+            }
+            let pan = self.p.pista(t).pan;
+            hp.circle_filled(pc, 10.0, if suena { Color32::WHITE } else { Color32::from_rgb(150, 154, 162) });
+            let a = -std::f32::consts::FRAC_PI_2 + pan * std::f32::consts::PI * 0.75;
+            hp.line_segment([pc + Vec2::new(a.cos(), a.sin()) * 2.5, pc + Vec2::new(a.cos(), a.sin()) * 8.5], Stroke::new(2.0, Color32::from_rgb(15, 16, 19)));
+            hp.text(pc + Vec2::new(-15.0, 9.0), Align2::CENTER_CENTER, "L", FontId::proportional(8.5), DIM);
+            hp.text(pc + Vec2::new(15.0, 9.0), Align2::CENTER_CENTER, "R", FontId::proportional(8.5), DIM);
+            let pt = if pan.abs() < 0.01 { "al centro".to_string() } else if pan < 0.0 { format!("{:.0} % izquierda", -pan * 100.0) } else { format!("{:.0} % derecha", pan * 100.0) };
+            presp.on_hover_text(format!("Paneo: {pt} · doble clic: al centro"));
+        }
+        // esquina de arriba: «+ Añadir pista»
+        let esq = Rect::from_min_size(Pos2::new(hx, rect.top()), Vec2::new(tn, rul));
+        hp.rect_filled(esq, 0, Color32::from_rgb(17, 18, 21));
+        hp.vline(esq.right() - 0.5, esq.y_range(), Stroke::new(1.0, Color32::from_rgb(13, 14, 17)));
+        let br = Rect::from_min_size(Pos2::new(esq.left() + 8.0, esq.top() + 3.0), Vec2::new(122.0, rul - 6.0));
+        let bresp = ui.interact(br, ui.id().with("pista_nueva"), Sense::click());
+        hp.rect_filled(br, 11, if bresp.hovered() { Color32::from_rgb(52, 55, 62) } else { Color32::from_rgb(38, 40, 46) });
+        hp.text(br.center(), Align2::CENTER_CENTER, "+  Añadir pista", FontId::proportional(12.0), Color32::WHITE);
+        if bresp.clicked() {
+            self.snap();
+            let n = self.p.tracks.len() as u32 + 1;
+            self.ensure_tracks(n);
+            self.send();
+        }
+        if cambio {
+            self.cambios = true;
+            self.send();
+        }
+    }
+
     pub(super) fn playlist_canvas(&mut self, ui: &mut Ui) {
+        let bw = self.pl_bw;
         let song = self.p.song_bars();
         let bars = (song + 8).max(32);
-        let (tn, rul) = (104.0, 22.0);
+        let (tn, rul) = (236.0, 28.0);
         let ntr = self.p.tracks.len();
-        let size = Vec2::new(tn + bars as f32 * BW, rul + ntr as f32 * TH);
+        let size = Vec2::new(tn + bars as f32 * bw, rul + ntr as f32 * TH);
         let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         let org = rect.min + Vec2::new(tn, rul);
         self.pl_org = org;
         self.pl_rect = Some(ui.clip_rect().intersect(rect));
-        let spx = BW / STEPS_PER_BAR as f32;
+        self.tut_mark("playlist", ui.clip_rect().intersect(rect));
+        let spx = bw / STEPS_PER_BAR as f32;
         for t in 0..ntr {
-            let r = Rect::from_min_size(Pos2::new(org.x, org.y + t as f32 * TH), Vec2::new(bars as f32 * BW, TH));
-            painter.rect_filled(r, 0, if t % 2 == 0 { Color32::from_rgb(38, 42, 48) } else { Color32::from_rgb(33, 37, 42) });
-            let nr = Rect::from_min_size(Pos2::new(rect.left(), r.top()), Vec2::new(tn, TH));
-            painter.rect_filled(nr, 0, Color32::from_rgb(34, 38, 44));
-            painter.text(Pos2::new(nr.left() + 8.0, nr.center().y), Align2::LEFT_CENTER, &self.p.tracks[t], FontId::proportional(13.0), DIM);
-            painter.hline(rect.left()..=rect.right(), r.bottom() - 0.5, Stroke::new(1.0, Color32::from_rgb(24, 27, 31)));
+            let r = Rect::from_min_size(Pos2::new(org.x, org.y + t as f32 * TH), Vec2::new(bars as f32 * bw, TH));
+            painter.rect_filled(r, 0, if t % 2 == 0 { Color32::from_rgb(29, 30, 34) } else { Color32::from_rgb(25, 26, 30) });
+            painter.hline(rect.left()..=rect.right(), r.bottom() - 0.5, Stroke::new(1.0, Color32::from_rgb(19, 19, 22)));
         }
-        painter.rect_filled(Rect::from_min_size(rect.min, Vec2::new(rect.width(), rul)), 0, Color32::from_rgb(28, 31, 36));
+        painter.rect_filled(Rect::from_min_size(rect.min, Vec2::new(rect.width(), rul)), 0, Color32::from_rgb(17, 18, 21));
+        painter.hline(rect.x_range(), rect.top() + rul - 0.5, Stroke::new(1.0, Color32::from_rgb(40, 43, 50)));
         // región de bucle / punch
         if self.p.loop_b > self.p.loop_a {
-            let x0 = org.x + self.p.loop_a as f32 * BW;
-            let x1 = org.x + self.p.loop_b as f32 * BW;
+            let x0 = org.x + self.p.loop_a as f32 * bw;
+            let x1 = org.x + self.p.loop_b as f32 * bw;
             let on = self.p.loop_on || self.p.punch;
             let col = if self.p.punch { Color32::from_rgb(200, 70, 70) } else { ACCENT };
             painter.rect_filled(Rect::from_min_max(Pos2::new(x0, rect.top() + 2.0), Pos2::new(x1, rect.top() + rul - 2.0)), 3, col.gamma_multiply(if on { 0.55 } else { 0.18 }));
@@ -599,45 +986,61 @@ impl StudioApp {
             }
         }
         for b in 0..=bars {
-            let x = org.x + b as f32 * BW;
-            painter.vline(x, org.y..=rect.bottom(), Stroke::new(1.0, if b % 4 == 0 { Color32::from_rgb(20, 22, 26) } else { Color32::from_rgb(28, 31, 35) }));
+            let x = org.x + b as f32 * bw;
+            painter.vline(x, org.y..=rect.bottom(), Stroke::new(1.0, if b % 4 == 0 { Color32::from_rgb(15, 16, 19) } else { Color32::from_rgb(21, 22, 26) }));
             if b < bars {
-                painter.text(Pos2::new(x + 4.0, rect.top() + 11.0), Align2::LEFT_CENTER, format!("{}", b + 1), FontId::proportional(11.0), if b < song { DIM } else { Color32::from_rgb(80, 88, 98) });
+                painter.vline(x, (rect.top() + rul - 9.0)..=(rect.top() + rul), Stroke::new(1.0, Color32::from_rgb(70, 74, 84)));
+                painter.text(Pos2::new(x + 4.0, rect.top() + 13.0), Align2::LEFT_CENTER, format!("{}", b + 1), FontId::proportional(12.0), if b < song { Color32::WHITE } else { Color32::from_rgb(60, 62, 71) });
             }
         }
         let pf = org.x + self.play_from as f32 * spx;
         painter.add(egui::Shape::convex_polygon(vec![Pos2::new(pf - 5.0, rect.top() + rul - 8.0), Pos2::new(pf + 5.0, rect.top() + rul - 8.0), Pos2::new(pf, rect.top() + rul)], ACCENT2, Stroke::NONE));
         // clips de patrón
-        let pat_rect = |cl: &Clip, p: &Pattern| Rect::from_min_size(Pos2::new(org.x + cl.bar as f32 * BW + 1.0, org.y + cl.track as f32 * TH + 2.0), Vec2::new(p.bars as f32 * BW - 2.0, TH - 4.0));
+        let pat_rect = |cl: &Clip, p: &Pattern| Rect::from_min_size(Pos2::new(org.x + cl.bar as f32 * bw + 1.0, org.y + cl.track as f32 * TH + 2.0), Vec2::new(p.bars as f32 * bw - 2.0, TH - 4.0));
         let step_rect = |track: u32, start: u32, len: u32| Rect::from_min_size(Pos2::new(org.x + start as f32 * spx + 1.0, org.y + track as f32 * TH + 2.0), Vec2::new((len as f32 * spx - 2.0).max(4.0), TH - 4.0));
         for cl in &self.p.playlist {
             let Some(p) = self.p.pattern(cl.pat) else { continue };
             let r = pat_rect(cl, p);
-            painter.rect(r, 4, c32(p.color), Stroke::new(1.0, Color32::from_black_alpha(60)), StrokeKind::Inside);
-            painter.text(r.left_top() + Vec2::new(5.0, 3.0), Align2::LEFT_TOP, &p.name, FontId::proportional(11.0), Color32::from_rgb(17, 17, 17));
-            draw_pattern_preview(&painter, Rect::from_min_max(Pos2::new(r.left(), r.top() + 16.0), r.right_bottom() - Vec2::new(0.0, 2.0)), p);
+            let c = c32(p.color);
+            painter.rect_filled(r, 5, lerp_col(c, BG, 0.5));
+            let banda = Rect::from_min_size(r.min, Vec2::new(r.width(), 16.0));
+            painter.rect_filled(banda, CornerRadius { nw: 5, ne: 5, sw: 0, se: 0 }, lerp_col(c, BG, 0.18));
+            painter.with_clip_rect(banda.intersect(painter.clip_rect())).text(banda.left_center() + Vec2::new(5.0, 0.0), Align2::LEFT_CENTER, &p.name, FontId::proportional(11.0), Color32::WHITE);
+            painter.rect_stroke(r, 5, Stroke::new(1.0, lerp_col(c, BG, 0.2)), StrokeKind::Inside);
+            draw_pattern_preview(&painter, Rect::from_min_max(Pos2::new(r.left() + 1.0, r.top() + 18.0), r.right_bottom() - Vec2::new(1.0, 3.0)), p);
         }
         // clips de audio
         let ss = self.p.step_secs() as f32;
         for cl in &self.p.audio_clips {
             let r = step_rect(cl.track, cl.start, cl.len);
             let chn = self.p.channel(cl.ch);
-            let col = Color32::from_rgb(64, 120, 150);
-            painter.rect(r, 4, col, Stroke::new(1.0, Color32::from_black_alpha(80)), StrokeKind::Inside);
+            // como en BandLab: cuerpo azul, banda con el nombre y onda celeste llena
+            let cuerpo = Color32::from_rgb(30, 86, 172);
+            let onda = Color32::from_rgb(88, 164, 255);
+            painter.rect_filled(r, 4, cuerpo);
+            let banda = Rect::from_min_size(r.min, Vec2::new(r.width(), 16.0));
+            painter.rect_filled(banda, CornerRadius { nw: 4, ne: 4, sw: 0, se: 0 }, Color32::from_rgb(25, 72, 146));
+            painter.rect_stroke(r, 4, Stroke::new(1.0, Color32::from_rgb(64, 132, 236)), StrokeKind::Inside);
             let file = cl.file().to_string();
             if let Some((pk, secs)) = self.wave_peaks.get(&file) {
                 let ratio = cl.ratio(self.p.bpm);
-                let mid = r.center().y + 6.0;
-                let h = (r.height() - 18.0) / 2.0;
-                let n = pk.len() as f32;
-                let mut x = r.left();
-                while x < r.right() {
-                    let t_clip = (x - r.left()) / spx * ss; // segundos en la línea de tiempo
-                    let src = cl.off + t_clip / ratio;
-                    let src = if cl.reverse { secs - src } else { src };
-                    if src >= 0.0 && src < *secs {
-                        let v = pk[((src / secs * n) as usize).min(pk.len() - 1)] * cl.gain.min(2.0);
-                        painter.vline(x, (mid - v * h)..=(mid + v * h), Stroke::new(1.0, Color32::from_rgb(190, 225, 240)));
+                let (arriba, abajo) = (r.top() + 18.0, r.bottom() - 3.0);
+                let mid = (arriba + abajo) / 2.0;
+                let h = (abajo - arriba) / 2.0;
+                let n = pk.len();
+                let por_px = ss / spx / ratio; // segundos del audio por píxel
+                painter.hline((r.left() + 1.0)..=(r.right() - 1.0), mid, Stroke::new(1.0, Color32::from_rgb(52, 118, 214)));
+                let mut x = r.left() + 1.0;
+                while x < r.right() - 1.0 {
+                    let t0 = cl.off + (x - r.left()) / spx * ss / ratio;
+                    let (a0, a1) = if cl.reverse { (secs - t0 - por_px, secs - t0) } else { (t0, t0 + por_px) };
+                    if a1 > 0.0 && a0 < *secs {
+                        // el pico más alto de todo lo que cae en este píxel (la onda no parpadea al hacer zoom)
+                        let i0 = ((a0.max(0.0) / secs) * n as f32) as usize;
+                        let i1 = (((a1 / secs) * n as f32).ceil() as usize).clamp(i0 + 1, n);
+                        let v = pk[i0.min(n - 1)..i1].iter().fold(0f32, |m, p| m.max(*p));
+                        let v = (v * cl.gain).min(1.0).max(0.02);
+                        painter.vline(x, (mid - v * h)..=(mid + v * h), Stroke::new(1.0, onda));
                     }
                     x += 1.0;
                 }
@@ -654,7 +1057,7 @@ impl StudioApp {
             if cl.pitch.abs() > 0.01 {
                 label = format!("{label} · {:+.0} st", cl.pitch);
             }
-            painter.with_clip_rect(r.intersect(painter.clip_rect())).text(r.left_top() + Vec2::new(5.0, 2.0), Align2::LEFT_TOP, label, FontId::proportional(10.5), Color32::from_rgb(12, 20, 26));
+            painter.with_clip_rect(banda.intersect(painter.clip_rect())).text(banda.left_center() + Vec2::new(5.0, 0.0), Align2::LEFT_CENTER, label, FontId::proportional(11.0), Color32::WHITE);
             if cl.fade_in > 0.0 {
                 let w = (cl.fade_in / ss * spx).min(r.width());
                 painter.line_segment([r.left_bottom(), Pos2::new(r.left() + w, r.top())], Stroke::new(1.0, Color32::from_black_alpha(160)));
@@ -668,16 +1071,28 @@ impl StudioApp {
         if let Some(tr) = &self.rec_track {
             let now = self.status.pos();
             let s0 = tr.region.map(|r| r.0).unwrap_or(tr.from) as f32;
-            let track = self.p.audio_clips.iter().find(|c| c.ch == tr.ch).map(|c| c.track).unwrap_or(self.free_track(tr.from, 16));
+            let track = tr.track;
             let w = if tr.looped { tr.region.map(|r| (r.1 - r.0) as f32).unwrap_or(16.0) } else { (now as f32 - s0).max(0.5) };
             let r = Rect::from_min_size(Pos2::new(org.x + s0 * spx, org.y + track as f32 * TH + 2.0), Vec2::new(w * spx, TH - 4.0));
-            painter.rect(r, 4, RED.gamma_multiply(0.35), Stroke::new(1.5, RED), StrokeKind::Inside);
-            painter.text(r.left_top() + Vec2::new(5.0, 3.0), Align2::LEFT_TOP, "GRABANDO", FontId::proportional(11.0), Color32::WHITE);
+            painter.rect(r, 4, Color32::from_rgb(20, 22, 78), Stroke::new(1.5, RED), StrokeKind::Inside);
+            // forma de onda en vivo: en bucle se ve la vuelta actual
+            let px_s = spx / self.p.step_secs() as f32;
+            let grabado = self.rec_secs();
+            let (desde, hasta) = if tr.looped {
+                let vuelta = w * self.p.step_secs() as f32;
+                let k = (grabado / vuelta.max(0.01)).floor();
+                (k * vuelta, grabado)
+            } else {
+                (0.0, grabado)
+            };
+            self.rec_draw(&painter.with_clip_rect(r.intersect(painter.clip_rect())), r, px_s, desde, hasta);
+            let vueltas = if tr.looped { format!(" · toma {}", (grabado / (w * self.p.step_secs() as f32).max(0.01)).floor() as u32 + 1) } else { String::new() };
+            painter.with_clip_rect(r.intersect(painter.clip_rect())).text(r.left_top() + Vec2::new(5.0, 3.0), Align2::LEFT_TOP, format!("GRABANDO{vueltas}"), FontId::proportional(11.0), Color32::WHITE);
         }
         // automatización
         for a in &self.p.autos {
             let r = step_rect(a.track, a.start, a.len);
-            painter.rect(r, 4, Color32::from_rgb(52, 46, 70), Stroke::new(1.0, Color32::from_rgb(130, 110, 190)), StrokeKind::Inside);
+            painter.rect(r, 4, Color32::from_rgb(38, 39, 45), Stroke::new(1.0, Color32::from_rgb(130, 110, 190)), StrokeKind::Inside);
             let inner = r.shrink2(Vec2::new(2.0, 4.0));
             let mut pts = vec![];
             let n = (inner.width() / 3.0).max(2.0) as usize;
@@ -691,9 +1106,21 @@ impl StudioApp {
         }
         // cabezal
         if self.song_mode && self.playing() {
-            let x = org.x + (self.status.pos() / 16.0) as f32 * BW;
-            painter.vline(x, rect.top()..=rect.bottom(), Stroke::new(2.0, ACCENT2));
+            let x = org.x + (self.status.pos() / 16.0) as f32 * bw;
+            painter.vline(x, (rect.top() + 4.0)..=rect.bottom(), Stroke::new(1.5, Color32::WHITE));
+            painter.circle_filled(Pos2::new(x, rect.top() + 4.0), 4.0, Color32::WHITE);
         }
+        // zoom con Ctrl + rueda del ratón
+        if resp.hovered() {
+            // egui convierte Ctrl + rueda en un factor de zoom
+            let z = ui.input(|i| i.zoom_delta());
+            if (z - 1.0).abs() > 1e-3 {
+                self.pl_bw = (self.pl_bw * z).clamp(16.0, 240.0);
+            }
+        }
+
+        // ---------- cabeceras de pista: fijas a la izquierda, como en BandLab ----------
+        self.cabeceras_pista(ui, rect, org, tn, rul);
 
         // ---------- interacción ----------
         let hit = |this: &Self, pos: Pos2| -> Option<(Kind, usize, Rect)> {
@@ -744,7 +1171,7 @@ impl StudioApp {
                     let edge = 7.0f32.min(r.width() / 3.0);
                     match k {
                         Kind::Pat => {
-                            let b = ((pos.x - org.x) / BW).floor() as i32;
+                            let b = ((pos.x - org.x) / bw).floor() as i32;
                             self.pl_drag = Some(PlDrag::Pat { idx: i, bar0: b, tr0: t as i32, orig: self.p.playlist[i], moved: false });
                         }
                         Kind::Audio => {
@@ -773,7 +1200,7 @@ impl StudioApp {
                 let mut changed = false;
                 match self.pl_drag.as_mut().unwrap() {
                     PlDrag::Loop { a } => {
-                        let b = ((pos.x - org.x) / BW).max(0.0).ceil() as u32;
+                        let b = ((pos.x - org.x) / bw).max(0.0).ceil() as u32;
                         let (x, y) = if b > *a { (*a, b) } else { (b.saturating_sub(1).min(*a), *a + 1) };
                         if self.p.loop_a != x || self.p.loop_b != y {
                             self.p.loop_a = x;
@@ -782,7 +1209,7 @@ impl StudioApp {
                         }
                     }
                     PlDrag::Pat { idx, bar0, tr0, orig, moved } => {
-                        let b = ((pos.x - org.x) / BW).floor() as i32;
+                        let b = ((pos.x - org.x) / bw).floor() as i32;
                         let nb = (orig.bar as i32 + b - *bar0).max(0) as u32;
                         let nt = (orig.track as i32 + t as i32 - *tr0).clamp(0, ntr as i32 - 1) as u32;
                         if let Some(cl) = self.p.playlist.get_mut(*idx) {
@@ -875,7 +1302,7 @@ impl StudioApp {
             if let Some(pos) = resp.interact_pointer_pos() {
                 self.pl_menu = None;
                 if pos.y < org.y {
-                    let b = ((pos.x - org.x) / BW).floor().max(0.0) as u32;
+                    let b = ((pos.x - org.x) / bw).floor().max(0.0) as u32;
                     self.play_from = b * STEPS_PER_BAR;
                     self.song_mode = true;
                     self.play(b * STEPS_PER_BAR);
@@ -893,7 +1320,7 @@ impl StudioApp {
                             self.open_win(Win::Auto(id));
                         }
                         None => {
-                            let b = ((pos.x - org.x) / BW).floor().max(0.0) as u32;
+                            let b = ((pos.x - org.x) / bw).floor().max(0.0) as u32;
                             let (_, t) = self.pl_cell(pos);
                             self.snap();
                             let pat = self.sel_pat;
@@ -984,6 +1411,45 @@ impl StudioApp {
                             }
                             ui.separator();
                         }
+                        ui.label(RichText::new("AFINAR LA VOZ (NN TUNE)").small().color(DIM));
+                        ui.horizontal(|ui| {
+                            if ui.button("Natural").on_hover_text("Corrige las notas desafinadas sin que se note").clicked() {
+                                let tp = TuneP { estilo: 1, speed: 0.6, ..self.tune_params() };
+                                self.afinar_clip(id, tp);
+                                close = true;
+                            }
+                            if ui.button("Efecto robot").on_hover_text("Corrección instantánea: el sonido típico del autotune").clicked() {
+                                let tp = TuneP { estilo: 2, ..self.tune_params() };
+                                self.afinar_clip(id, tp);
+                                close = true;
+                            }
+                            if ui.button("Como en el panel").on_hover_text("Con el estilo, la escala y la intensidad del panel Micrófono").clicked() {
+                                let tp = self.tune_params();
+                                self.afinar_clip(id, tp);
+                                close = true;
+                            }
+                        });
+                        if ui.button("Retune: editar nota por nota…").on_hover_text("Mueve cada nota de la voz a mano, como en un editor de afinación").clicked() {
+                            self.abrir_retune(id);
+                            close = true;
+                        }
+                        ui.label(RichText::new("CREAR ARMONÍA (DUPLICA LA TOMA EN OTRA PISTA)").small().color(DIM));
+                        ui.horizontal_wrapped(|ui| {
+                            for (n, k, semis, ayuda) in [
+                                ("Tercera arriba", 2, None, "La armonía más común: suena dulce y llena"),
+                                ("Tercera abajo", -2, None, "Una voz más grave que acompaña"),
+                                ("Quinta arriba", 4, None, "Armonía abierta, muy usada en coros"),
+                                ("Octava arriba", 0, Some(12), "Tu voz una octava más aguda, para doblar"),
+                                ("Octava abajo", 0, Some(-12), "Tu voz una octava más grave, para dar cuerpo"),
+                            ] {
+                                if ui.button(n).on_hover_text(format!("{ayuda} · en la escala de {}", self.tune_key_label())).clicked() {
+                                    self.crear_armonia(id, n, k, semis);
+                                    close = true;
+                                }
+                            }
+                        });
+                        ui.label(RichText::new(format!("Tonalidad: {}", self.tune_key_label())).small().color(DIM));
+                        ui.separator();
                         if step > c.start && step < c.start + c.len && ui.button(format!("Cortar aquí (compás {}.{})", step / 16 + 1, (step % 16) / 4 + 1)).clicked() {
                             self.split_clip(id, step);
                             close = true;
@@ -1091,6 +1557,96 @@ impl StudioApp {
         }
     }
 
+    /// Afina la toma activa de un clip con NN Tune (en segundo plano) y la agrega como toma nueva.
+    /// Duplica la toma de un clip en otra pista, llevada a una armonía dentro de la escala.
+    pub(super) fn crear_armonia(&mut self, id: u32, que: &str, k: i32, semis: Option<i32>) {
+        let Some(c) = self.p.audio_clip(id).cloned() else { return };
+        let file = c.file().to_string();
+        let Some(path) = media::resolve(&self.plat.data_dir, &file) else {
+            self.msg = "No se encuentra el audio del clip.".into();
+            return;
+        };
+        let mask = self.tune_params().mask;
+        let dir = self.plat.data_dir.join("audio");
+        let tx = self.file_tx.clone();
+        let ctx = self.ctx.clone();
+        let que = que.to_string();
+        self.msg = format!("Creando la armonía ({que})…");
+        std::thread::spawn(move || {
+            let r = (|| -> Result<(String, Buf), String> {
+                let b = media::decode(&path)?;
+                let mono = b.mono();
+                let data = crate::fx::armonia(&mono, b.sr, mask, k, semis);
+                let _ = std::fs::create_dir_all(&dir);
+                let stem = std::path::Path::new(&file).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "voz".into());
+                let base = format!("{stem} (armonía {})", que.to_lowercase());
+                let mut name = format!("{base}.wav");
+                let mut n = 2;
+                while dir.join(&name).exists() {
+                    name = format!("{base} {n}.wav");
+                    n += 1;
+                }
+                let out = Buf { ch: 1, sr: b.sr, data };
+                media::write_wav(&dir.join(&name), &out).map_err(|e| e.to_string())?;
+                Ok((name, out))
+            })();
+            let _ = tx.send(FileMsg::Armonia(id, que, r));
+            if let Some(c) = ctx {
+                c.request_repaint();
+            }
+        });
+    }
+
+    pub(super) fn afinar_clip(&mut self, id: u32, tp: TuneP) {
+        let Some(c) = self.p.audio_clip(id).cloned() else { return };
+        let file = c.file().to_string();
+        let Some(path) = media::resolve(&self.plat.data_dir, &file) else {
+            self.msg = "No se encuentra el audio del clip.".into();
+            return;
+        };
+        let speed = crate::fx::velocidad(&tp);
+        let seguir = self.settings.tune_acordes.then(|| (self.p.clone(), c.start, c.off, self.p.step_secs() as f32));
+        let dir = self.plat.data_dir.join("audio");
+        let tx = self.file_tx.clone();
+        let ctx = self.ctx.clone();
+        self.msg = "Afinando la voz con NN Tune…".into();
+        std::thread::spawn(move || {
+            let r = (|| -> Result<(String, Buf), String> {
+                let b = media::decode(&path)?;
+                let mono = b.mono();
+                let res = match &seguir {
+                    Some((proj, start, off, ss)) => {
+                        let sr = b.sr;
+                        let mascara = |i: usize| -> u16 {
+                            let t = (i as f32 / sr - off).max(0.0);
+                            let paso = *start as u64 + (t / ss) as u64;
+                            let a = proj.acorde_en(None, paso);
+                            if a.count_ones() >= 3 { a } else { tp.mask }
+                        };
+                        crate::fx::TuneResult { out: crate::fx::autotune_con(&mono, sr, &tp, &mascara), detected: vec![], corrected: vec![], hop: 256 }
+                    }
+                    None => crate::fx::autotune(&mono, b.sr, &tp),
+                };
+                let _ = std::fs::create_dir_all(&dir);
+                let stem = std::path::Path::new(&file).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "voz".into());
+                let tipo = if speed < 0.05 { "robot" } else { "afinada" };
+                let mut name = format!("{stem} ({tipo}).wav");
+                let mut k = 2;
+                while dir.join(&name).exists() {
+                    name = format!("{stem} ({tipo} {k}).wav");
+                    k += 1;
+                }
+                let out = Buf { ch: 1, sr: b.sr, data: res.out };
+                media::write_wav(&dir.join(&name), &out).map_err(|e| e.to_string())?;
+                Ok((name, out))
+            })();
+            let _ = tx.send(FileMsg::Afinado(id, r));
+            if let Some(c) = ctx {
+                c.request_repaint();
+            }
+        });
+    }
+
     pub(super) fn edit_clip(&mut self, id: u32, f: impl FnOnce(&mut AudioClip)) {
         self.snap();
         if let Some(c) = self.p.audio_clips.iter_mut().find(|c| c.id == id) {
@@ -1176,16 +1732,16 @@ impl StudioApp {
         });
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(560.0, 200.0), Sense::click_and_drag());
         let p = ui.painter_at(rect);
-        p.rect_filled(rect, 4, Color32::from_rgb(22, 24, 30));
+        p.rect_filled(rect, 4, Color32::from_rgb(17, 18, 21));
         let bars = (a.len as f32 / 16.0).max(0.25);
         let mut b = 0.0;
         while b <= bars {
             let x = rect.left() + b / bars * rect.width();
-            p.vline(x, rect.y_range(), Stroke::new(1.0, Color32::from_rgb(40, 44, 52)));
+            p.vline(x, rect.y_range(), Stroke::new(1.0, Color32::from_rgb(31, 32, 37)));
             b += if bars > 16.0 { 4.0 } else { 1.0 };
         }
         for k in 1..4 {
-            p.hline(rect.x_range(), rect.top() + rect.height() * k as f32 / 4.0, Stroke::new(1.0, Color32::from_rgb(36, 40, 48)));
+            p.hline(rect.x_range(), rect.top() + rect.height() * k as f32 / 4.0, Stroke::new(1.0, Color32::from_rgb(28, 29, 33)));
         }
         let to = |pt: [f32; 2]| Pos2::new(rect.left() + pt[0] * rect.width(), rect.bottom() - pt[1] * rect.height());
         let mut line = vec![to([0.0, a.at(0.0)])];
@@ -1354,7 +1910,7 @@ impl StudioApp {
         // forma de onda con inicio/fin y cortes
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(560.0, 130.0), Sense::click_and_drag());
         let p = ui.painter_at(rect);
-        p.rect_filled(rect, 4, Color32::from_rgb(20, 23, 27));
+        p.rect_filled(rect, 4, Color32::from_rgb(16, 16, 19));
         if let Some((pk, _)) = self.wave_peaks.get(&sp.file) {
             let n = pk.len();
             for x in 0..rect.width() as usize {
@@ -1362,7 +1918,7 @@ impl StudioApp {
                 let v = pk[i.min(n - 1)] * sp.gain.min(2.0);
                 let cx = rect.left() + x as f32;
                 let inside = (x as f32 / rect.width()) >= sp.start && (x as f32 / rect.width()) <= sp.end;
-                let col = if inside { Color32::from_rgb(242, 170, 90) } else { Color32::from_rgb(90, 80, 70) };
+                let col = if inside { Color32::from_rgb(242, 170, 90) } else { Color32::from_rgb(54, 56, 64) };
                 p.vline(cx, (rect.center().y - v * 60.0)..=(rect.center().y + v * 60.0), Stroke::new(1.0, col));
             }
         } else {
@@ -1625,11 +2181,21 @@ impl StudioApp {
             Some((a, _)) => a.saturating_sub(16),
             None => self.play_from,
         };
-        match audio::record(self.status.clone()) {
+        self.mic_mon = None;
+        match audio::record(self.status.clone(), &self.settings.entrada, true, self.settings.canal_entrada as usize) {
             Ok(r) => {
+                if self.settings.metro_grabar {
+                    self.cmd(Cmd::Metronome(true));
+                }
                 self.song_mode = true;
                 self.play(from);
-                self.rec_track = Some(TrackRec { r, ch, from, region, looped, started: Instant::now() });
+                // carril libre desde donde empieza hasta el final de la canción
+                let fin = (self.p.song_bars() * STEPS_PER_BAR).max(from + 64);
+                let track = self.p.audio_clips.iter().find(|c| c.ch == ch && c.start >= from).map(|c| c.track).unwrap_or_else(|| self.free_track(from, fin - from));
+                self.ensure_tracks(track + 1);
+                self.rec_track = Some(TrackRec { r, ch, from, region, looped, started: Instant::now(), track });
+                // después de guardar la grabación: así la escucha usa este micrófono y no abre otro
+                self.escucha_sync();
                 self.msg = if looped { "Grabando en bucle: cada vuelta es una toma. Espacio o Detener para terminar.".into() } else if region.is_some() { "Grabando con punch: solo se guarda la región marcada.".into() } else { "Grabando en la pista de audio… Espacio o Detener para terminar.".into() };
             }
             Err(e) => self.msg = format!("No se pudo grabar: {e}"),
@@ -1639,6 +2205,8 @@ impl StudioApp {
     pub(super) fn rec_track_stop(&mut self) {
         let Some(tr) = self.rec_track.take() else { return };
         self.cmd(Cmd::Stop);
+        self.cmd(Cmd::Metronome(self.metro));
+        self.escucha_sync();
         self.status.playing.store(false, Ordering::Relaxed);
         let sr = tr.r.sr as f32;
         let data = tr.r.buf.lock().map(|b| b.clone()).unwrap_or_default();
@@ -1683,8 +2251,11 @@ impl StudioApp {
         self.snap();
         let ts = now_secs();
         let n = pieces.len();
+        let nivelar = self.settings.nivelar_grabacion;
         for (k, (start, len, audio_data)) in pieces.into_iter().enumerate() {
             let name = format!("grabacion_{}_{}_{}.wav", tr.ch, ts, k + 1);
+            // la toma suena tan fuerte y pareja como te escuchaste
+            let audio_data = if nivelar { crate::fx::nivelar(&audio_data, sr) } else { audio_data };
             let b = Buf { ch: 1, sr, data: audio_data };
             if let Err(e) = media::write_wav(&dir.join(&name), &b) {
                 self.msg = format!("No se pudo guardar la toma: {e}");
@@ -1700,11 +2271,18 @@ impl StudioApp {
                     c.active = c.takes.len() - 1;
                 }
                 None => {
-                    let track = self.free_track(start, len);
+                    let track = tr.track;
                     self.ensure_tracks(track + 1);
                     let id = self.p.new_id();
                     self.p.audio_clips.push(AudioClip { id, ch: tr.ch, track, start, len, off: 0.0, takes: vec![name], active: 0, gain: 1.0, pitch: 0.0, bpm: 0.0, fade_in: 0.0, fade_out: 0.0, reverse: false });
                 }
+            }
+        }
+        if self.settings.tune_vivo {
+            let ids: Vec<u32> = self.p.audio_clips.iter().filter(|c| c.ch == tr.ch && c.takes.last().is_some_and(|t| t.starts_with(&format!("grabacion_{}_{}_", tr.ch, ts)))).map(|c| c.id).collect();
+            let tp = self.tune_params();
+            for id in ids {
+                self.afinar_clip(id, tp);
             }
         }
         self.msg = if n > 1 { format!("{n} tomas grabadas. Clic derecho en el clip para elegir la toma; «Cortar aquí» para combinarlas (comping).") } else { "Toma grabada en la playlist.".into() };
@@ -2050,7 +2628,7 @@ impl StudioApp {
         // barra de sonoridad
         let (r, _) = ui.allocate_exact_size(Vec2::new(360.0, 16.0), Sense::hover());
         let p = ui.painter();
-        p.rect_filled(r, 3, Color32::from_rgb(14, 16, 18));
+        p.rect_filled(r, 3, Color32::from_rgb(11, 11, 14));
         let fx = |db: f32| r.left() + ((db + 36.0) / 36.0).clamp(0.0, 1.0) * r.width();
         p.rect_filled(Rect::from_min_max(r.min, Pos2::new(fx(l[1]), r.bottom())), 3, if l[1] > -9.0 { RED } else if l[1] > -16.0 { GREEN } else { Color32::from_rgb(90, 155, 224) });
         let tgt = MASTER_TARGETS[self.master_target].1;
@@ -2058,16 +2636,69 @@ impl StudioApp {
         ui.label(RichText::new("Reproduce la canción en SONG para medir. La línea blanca es el objetivo.").small().color(DIM));
         ui.separator();
         ui.label(RichText::new("MASTERIZAR CON UN CLIC").strong());
-        egui::ComboBox::from_id_salt("mt").width(220.0).selected_text(MASTER_TARGETS[self.master_target].0).show_ui(ui, |ui| {
-            for (i, (n, _)) in MASTER_TARGETS.iter().enumerate() {
-                ui.selectable_value(&mut self.master_target, i, *n);
+        // estilos como tarjetas
+        ui.horizontal(|ui| {
+            for (i, (n, d, _, _)) in MASTER_ESTILOS.iter().enumerate() {
+                let sel = self.master_estilo == i;
+                let (r, resp) = ui.allocate_exact_size(Vec2::new(86.0, 40.0), Sense::click());
+                let t = ui.ctx().animate_bool_with_time(resp.id, sel, 0.18);
+                let p = ui.painter();
+                let base = if resp.hovered() { Color32::from_rgb(36, 38, 44) } else { Color32::from_rgb(26, 28, 33) };
+                p.rect(r, 8, lerp_col(base, Color32::WHITE, t), Stroke::new(1.0, lerp_col(LINE, Color32::WHITE, t)), StrokeKind::Inside);
+                p.text(r.center(), Align2::CENTER_CENTER, *n, FontId::proportional(13.0), lerp_col(Color32::WHITE, Color32::from_rgb(15, 16, 19), t));
+                if resp.on_hover_text(*d).clicked() {
+                    self.master_estilo = i;
+                }
+            }
+        });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Intensidad").small().color(DIM));
+            for (i, (n, l, _)) in MASTER_INT.iter().enumerate() {
+                if ui.add(egui::Button::selectable(self.master_int == i, *n)).on_hover_text(format!("Sonoridad final: {l:.0} LUFS")).clicked() {
+                    self.master_int = i;
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            for (k, n) in ["Graves", "Medios", "Agudos"].iter().enumerate() {
+                ui.label(RichText::new(*n).small().color(DIM));
+                ui.add(egui::DragValue::new(&mut self.master_eq3[k]).range(-6.0..=6.0).speed(0.05).suffix(" dB").fixed_decimals(1));
+            }
+        });
+        // canción de referencia
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            match &self.master_ref {
+                Some((n, l, _)) => {
+                    ui.label(RichText::new(format!("Referencia: {n} ({l:.1} LUFS)")).small().color(ACCENT2));
+                    if ui.small_button("Quitar").clicked() {
+                        self.master_ref = None;
+                    }
+                }
+                None => {
+                    if ui.button("Igualar a una canción de referencia…").on_hover_text("Elige una canción que te guste: se copia su volumen y su balance de graves, medios y agudos").clicked() {
+                        if let Some(path) = self.pick_audio() {
+                            match media::decode(&path) {
+                                Ok(b) => {
+                                    let st: Vec<f32> = if b.ch == 1 { b.data.iter().flat_map(|v| [*v, *v]).collect() } else { b.data.clone() };
+                                    let (l, _) = crate::loudness::measure(&st, b.sr);
+                                    let bal = balance_3(&st, b.sr);
+                                    let n = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                                    self.master_ref = Some((n, l, bal));
+                                }
+                                Err(e) => self.msg = format!("No se pudo leer la referencia: {e}"),
+                            }
+                        }
+                    }
+                }
             }
         });
         let busy = self.master_job.is_some();
         if ui.add_enabled(!busy, egui::Button::new(if busy { "Analizando la canción…" } else { "Masterizar canción" }).min_size(Vec2::new(220.0, 30.0))).clicked() {
             self.start_mastering();
         }
-        ui.label(RichText::new("Ajusta NN EQ, NN Dynamics y el limitador del master para llegar a la sonoridad elegida sin distorsión. Se puede deshacer.").small().color(DIM));
+        ui.label(RichText::new("Ajusta NN EQ, NN Dynamics y el limitador del master sin distorsión. Se puede deshacer.").small().color(DIM));
         if ui.button("Quitar mastering (valores neutros)").clicked() {
             self.snap();
             self.p.master_eq = default_eq();
@@ -2085,33 +2716,25 @@ impl StudioApp {
         let (tx, rx) = mpsc::channel();
         let mut p = self.p.clone();
         let bank = self.bank();
-        let (target, style) = (MASTER_TARGETS[self.master_target].1, self.master_target);
+        let (estilo, int, eq3, referencia) = (self.master_estilo, self.master_int, self.master_eq3, self.master_ref.clone());
+        let target = referencia.as_ref().map(|r| r.1.clamp(-20.0, -7.0)).unwrap_or(MASTER_INT[int.min(2)].1);
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
-            // cadena base según el estilo
-            p.master_eq = default_eq();
-            p.master_eq[0].on = true;
-            p.master_eq[0].freq = 28.0;
-            match style {
-                1 => {
-                    p.master_eq[1].gain = 1.5;
-                    p.master_eq[4].gain = 1.5;
-                }
-                3 => {
-                    p.master_eq[4].gain = -2.5;
-                    p.master_eq[1].gain = 1.0;
-                }
-                2 => {}
-                _ => {
-                    p.master_eq[4].gain = 0.8;
-                }
-            }
-            p.master_comp = CompP { on: true, threshold: -16.0, ratio: if style == 1 { 3.0 } else { 2.0 }, attack_ms: 20.0, release_ms: 180.0, makeup: 0.0, sc: 0 };
-            p.limiter = LimP { on: true, gain_db: 0.0, ceiling_db: -1.0, release_ms: 60.0 };
             let (pr, ca) = (AtomicU32::new(0), AtomicBool::new(false));
+            let (mut eq, comp) = cadena_master(estilo, int, eq3);
+            p.master_eq = eq;
+            p.master_comp = comp;
+            p.limiter = LimP { on: true, gain_db: 0.0, ceiling_db: -1.0, release_ms: 60.0 };
             let mut gain = 0.0f32;
             let mut lufs = -70.0;
-            // dos pasadas: medir, corregir, volver a medir
+            // con referencia: se mide la mezcla y se corrige su balance hacia el de la referencia
+            if let Some((_, _, bal_ref)) = &referencia {
+                let a = crate::engine::render_song(&p, &bank, 44_100.0, &pr, &ca);
+                let bal = balance_3(&a, 44_100.0);
+                let d: Vec<f32> = (0..3).map(|k| ((bal_ref[k] - bal[k]) * 0.7).clamp(-4.0, 4.0)).collect();
+                eq = cadena_master(estilo, int, [eq3[0] + d[0], eq3[1] + d[1], eq3[2] + d[2]]).0;
+                p.master_eq = eq;
+            }
             for _ in 0..3 {
                 p.limiter.gain_db = gain;
                 let a = crate::engine::render_song(&p, &bank, 44_100.0, &pr, &ca);
@@ -2127,43 +2750,27 @@ impl StudioApp {
                 }
                 gain = (gain + d).clamp(-12.0, 18.0);
             }
-            let _ = tx.send(Ok((gain, lufs, p.master_comp.threshold)));
+            let _ = tx.send(Ok((gain, lufs, p.master_eq, p.master_comp)));
             if let Some(c) = ctx {
                 c.request_repaint();
             }
-            let _ = (p.master_eq, style);
         });
-        self.master_job = Some((rx, self.master_target));
+        self.master_job = Some((rx, self.master_estilo));
         self.msg = "Analizando la canción para masterizar…".into();
     }
 
     pub(super) fn poll_master(&mut self) {
-        let Some((rx, style)) = &self.master_job else { return };
-        let style = *style;
+        let Some((rx, _)) = &self.master_job else { return };
         match rx.try_recv() {
             Ok(r) => {
                 self.master_job = None;
                 match r {
-                    Ok((gain, lufs, thr)) => {
+                    Ok((gain, lufs, eq, comp)) => {
                         self.snap();
-                        self.p.master_eq = default_eq();
-                        self.p.master_eq[0].on = true;
-                        self.p.master_eq[0].freq = 28.0;
-                        match style {
-                            1 => {
-                                self.p.master_eq[1].gain = 1.5;
-                                self.p.master_eq[4].gain = 1.5;
-                            }
-                            3 => {
-                                self.p.master_eq[4].gain = -2.5;
-                                self.p.master_eq[1].gain = 1.0;
-                            }
-                            2 => {}
-                            _ => self.p.master_eq[4].gain = 0.8,
-                        }
-                        self.p.master_comp = CompP { on: true, threshold: thr, ratio: if style == 1 { 3.0 } else { 2.0 }, attack_ms: 20.0, release_ms: 180.0, makeup: 0.0, sc: 0 };
+                        self.p.master_eq = eq;
+                        self.p.master_comp = comp;
                         self.p.limiter = LimP { on: true, gain_db: gain, ceiling_db: -1.0, release_ms: 60.0 };
-                        self.msg = format!("Masterizado: {:.1} LUFS integrados (limitador +{:.1} dB). Deshacer para volver.", lufs, gain);
+                        self.msg = format!("Masterizado ({}): {:.1} LUFS integrados (limitador +{:.1} dB). Deshacer para volver.", MASTER_ESTILOS[self.master_estilo].0, lufs, gain);
                         self.send();
                     }
                     Err(e) => self.msg = e,
@@ -2189,64 +2796,303 @@ impl StudioApp {
     }
 
     pub(super) fn settings_window(&mut self, ui: &mut Ui) {
-        let before = self.settings.clone();
-        ui.label(RichText::new("GRABACIÓN").small().color(DIM));
-        ui.add(egui::Slider::new(&mut self.settings.latency_ms, 0.0..=250.0).suffix(" ms").text("Compensación de latencia"));
-        ui.label(RichText::new("Si lo grabado suena tarde respecto al beat, sube este valor.").small().color(DIM));
-        ui.separator();
-        ui.label(RichText::new("TECLADO MIDI").small().color(DIM));
-        #[cfg(not(target_os = "android"))]
-        {
-            let ports = midi::input::ports();
-            if ports.is_empty() {
-                ui.label("No hay teclados MIDI conectados.");
-            }
-            let mut pick = None;
-            for (i, p) in ports.iter().enumerate() {
-                let on = self.midi_conn.as_ref().is_some_and(|c| c.name == *p);
-                if ui.add(egui::Button::selectable(on, p)).clicked() {
-                    pick = Some(i);
-                    self.settings.midi_port = p.clone();
-                }
-            }
-            if pick.is_some() || ui.button("Buscar teclados").clicked() {
-                self.midi_connect();
-            }
-        }
-        #[cfg(target_os = "android")]
-        ui.label("En Android el teclado MIDI todavía no está disponible.");
-        ui.checkbox(&mut self.settings.midi_quant, "Cuantizar las notas grabadas");
-        ui.separator();
-        ui.label(RichText::new("VERSIONES").small().color(DIM));
-        ui.add(egui::Slider::new(&mut self.settings.version_min, 1..=30).suffix(" min").text("Guardar una versión cada"));
-        #[cfg(windows)]
-        {
-            ui.separator();
-            ui.label(RichText::new("PLUGINS CLAP").small().color(DIM));
-            ui.label(RichText::new("Se buscan en Archivos de programa\\Common Files\\CLAP y en estas carpetas:").small().color(DIM));
-            let mut rm = None;
-            for (i, d) in self.settings.plugin_dirs.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.label(d);
-                    if ui.small_button("Quitar").clicked() {
-                        rm = Some(i);
+        let antes = format!("{:?}", self.settings);
+        let secciones = ["General", "Audio", "Grabación", "MIDI", "Exportar", "Pantalla", "Plugins"];
+        let mut reiniciar_audio = false;
+        ui.horizontal_top(|ui| {
+            // columna de secciones
+            ui.vertical(|ui| {
+                ui.set_width(130.0);
+                for (i, n) in secciones.iter().enumerate() {
+                    #[cfg(not(windows))]
+                    if *n == "Plugins" {
+                        continue;
                     }
-                });
-            }
-            if let Some(i) = rm {
-                self.settings.plugin_dirs.remove(i);
-            }
-            if ui.button("Agregar carpeta…").clicked() {
-                if let Some(d) = rfd::FileDialog::new().pick_folder() {
-                    self.settings.plugin_dirs.push(d.to_string_lossy().to_string());
+                    if ui.add(egui::Button::selectable(self.ajuste_sec == i, RichText::new(*n).size(13.5)).min_size(Vec2::new(126.0, 30.0))).clicked() {
+                        self.ajuste_sec = i;
+                    }
                 }
+            });
+            ui.add_space(10.0);
+            ui.vertical(|ui| {
+                ui.set_width(420.0);
+                ui.set_min_height(380.0);
+                let titulo = |ui: &mut Ui, t: &str| {
+                    ui.label(RichText::new(t).strong().size(15.0).color(ACCENT2));
+                    ui.add_space(4.0);
+                };
+                let nota = |ui: &mut Ui, t: &str| {
+                    ui.label(RichText::new(t).small().color(DIM));
+                    ui.add_space(6.0);
+                };
+                match self.ajuste_sec {
+                    0 => {
+                        titulo(ui, "Al abrir el programa");
+                        ui.checkbox(&mut self.settings.abrir_ultimo, "Abrir el último proyecto");
+                        nota(ui, "Si está apagado, siempre empiezas con un proyecto nuevo.");
+                        ui.horizontal(|ui| {
+                            ui.label("Proyectos nuevos con");
+                            egui::ComboBox::from_id_salt("plant_nueva").width(160.0).selected_text(crate::templates::TEMPLATES[self.settings.plantilla_nueva.min(crate::templates::TEMPLATES.len() - 1)]).show_ui(ui, |ui| {
+                                for (i, n) in crate::templates::TEMPLATES.iter().enumerate() {
+                                    ui.selectable_value(&mut self.settings.plantilla_nueva, i, *n);
+                                }
+                            });
+                        });
+                        if self.settings.plantilla_nueva == 0 {
+                            ui.add(egui::Slider::new(&mut self.settings.bpm_nuevo, 60.0..=200.0).step_by(1.0).suffix(" bpm").text("Tempo inicial"));
+                        }
+                        ui.add_space(10.0);
+                        titulo(ui, "Guardar");
+                        ui.horizontal(|ui| {
+                            ui.label("Guardar solo");
+                            egui::ComboBox::from_id_salt("autog").width(150.0).selected_text(match self.settings.autoguardar_min {
+                                0 => "Nunca".to_string(),
+                                m => format!("Cada {m} minutos"),
+                            }).show_ui(ui, |ui| {
+                                for m in [0u32, 1, 2, 5, 10, 15] {
+                                    ui.selectable_value(&mut self.settings.autoguardar_min, m, if m == 0 { "Nunca".to_string() } else { format!("Cada {m} minutos") });
+                                }
+                            });
+                        });
+                        nota(ui, "Si el proyecto todavía no tiene nombre de archivo, se guarda como copia de recuperación.");
+                        ui.checkbox(&mut self.settings.versiones, "Guardar copias de respaldo (Archivo > Versiones anteriores)");
+                        if self.settings.versiones {
+                            ui.add(egui::Slider::new(&mut self.settings.version_min, 1..=30).suffix(" min").text("Una copia cada"));
+                        }
+                        ui.checkbox(&mut self.settings.preguntar, "Preguntar antes de cerrar si hay cambios sin guardar");
+                        ui.add_space(10.0);
+                        titulo(ui, "Tutorial");
+                        if ui.button("Ver el tutorial ahora").clicked() {
+                            self.tut_mostrar(0);
+                        }
+                    }
+                    1 => {
+                        titulo(ui, "Salida (parlantes o audífonos)");
+                        let salidas = audio::outputs();
+                        let actual = if self.settings.salida.is_empty() { "La de Windows".to_string() } else { self.settings.salida.clone() };
+                        egui::ComboBox::from_id_salt("salida").width(380.0).selected_text(actual).show_ui(ui, |ui| {
+                            if ui.selectable_label(self.settings.salida.is_empty(), "La de Windows").clicked() {
+                                self.settings.salida.clear();
+                                reiniciar_audio = true;
+                            }
+                            for n in &salidas {
+                                if ui.selectable_label(self.settings.salida == *n, n).clicked() {
+                                    self.settings.salida = n.clone();
+                                    reiniciar_audio = true;
+                                }
+                            }
+                        });
+                        if let Some(a) = &self.audio {
+                            nota(ui, &format!("Sonando por: {} · {} Hz", a.device, a.sr));
+                        } else if let Some(e) = &self.audio_err {
+                            ui.label(RichText::new(format!("Sin audio: {e}")).color(RED));
+                        }
+                        titulo(ui, "Entrada (micrófono)");
+                        let entradas = audio::inputs();
+                        let actual = if self.settings.entrada.is_empty() { "La de Windows".to_string() } else { self.settings.entrada.clone() };
+                        let antes_e = self.settings.entrada.clone();
+                        egui::ComboBox::from_id_salt("entrada").width(380.0).selected_text(actual).show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.settings.entrada, String::new(), "La de Windows");
+                            for n in &entradas {
+                                ui.selectable_value(&mut self.settings.entrada, n.clone(), n);
+                            }
+                        });
+                        if self.settings.entrada != antes_e {
+                            // la escucha pasa al micrófono nuevo
+                            self.mic_mon = None;
+                            self.escucha_sync();
+                        }
+                        ui.add_space(10.0);
+                        titulo(ui, "Latencia");
+                        let antes_b = self.settings.buffer;
+                        ui.horizontal(|ui| {
+                            ui.label("Tamaño del bloque");
+                            egui::ComboBox::from_id_salt("buffer").width(200.0).selected_text(match self.settings.buffer {
+                                0 => "Automático".to_string(),
+                                b => format!("{b} muestras"),
+                            }).show_ui(ui, |ui| {
+                                for b in [0u32, 128, 256, 512, 1024, 2048] {
+                                    ui.selectable_value(&mut self.settings.buffer, b, if b == 0 { "Automático".to_string() } else { format!("{b} muestras") });
+                                }
+                            });
+                        });
+                        if self.settings.buffer != antes_b {
+                            reiniciar_audio = true;
+                        }
+                        nota(ui, "Más chico: responde más rápido pero exige más al computador. Si se escuchan cortes, súbelo.");
+                        if ui.button("Reiniciar el audio").clicked() {
+                            reiniciar_audio = true;
+                        }
+                    }
+                    2 => {
+                        titulo(ui, "Grabación");
+                        ui.add(egui::Slider::new(&mut self.settings.latency_ms, 0.0..=250.0).suffix(" ms").text("Compensación de latencia"));
+                        nota(ui, "Si lo grabado queda corrido (suena tarde respecto al ritmo), sube este valor.");
+                        ui.checkbox(&mut self.settings.metro_grabar, "Metrónomo mientras se graba");
+                        ui.add_space(6.0);
+                        nota(ui, "Para escucharte y usar el autotune en vivo, abre el botón «Micrófono» de la barra de arriba.");
+                        nota(ui, "Solo se escucha en los audífonos o parlantes; no queda en la grabación.");
+                    }
+                    3 => {
+                        titulo(ui, "Teclado MIDI");
+                        #[cfg(not(target_os = "android"))]
+                        {
+                            let ports = midi::input::ports();
+                            if ports.is_empty() {
+                                ui.label("No hay teclados MIDI conectados.");
+                            }
+                            let mut pick = false;
+                            for p in ports.iter() {
+                                let on = self.midi_conn.as_ref().is_some_and(|c| c.name == *p);
+                                if ui.add(egui::Button::selectable(on, p)).clicked() {
+                                    pick = true;
+                                    self.settings.midi_port = p.clone();
+                                }
+                            }
+                            if pick || ui.button("Buscar teclados").clicked() {
+                                self.midi_connect();
+                            }
+                        }
+                        #[cfg(target_os = "android")]
+                        ui.label("En Android el teclado MIDI todavía no está disponible.");
+                        ui.add_space(6.0);
+                        ui.checkbox(&mut self.settings.midi_quant, "Acomodar al ritmo las notas que grabo (cuantizar)");
+                    }
+                    4 => {
+                        titulo(ui, "Dónde se guarda");
+                        let dir = self.plat.export_dir.display().to_string();
+                        ui.label(RichText::new(dir).small());
+                        ui.horizontal(|ui| {
+                            #[cfg(not(target_os = "android"))]
+                            if ui.button("Elegir carpeta…").clicked() {
+                                if let Some(d) = rfd::FileDialog::new().set_directory(&self.plat.export_dir).pick_folder() {
+                                    self.settings.export_dir = d.to_string_lossy().to_string();
+                                    self.plat.export_dir = d;
+                                }
+                            }
+                            if !self.settings.export_dir.is_empty() && ui.button("Volver al Escritorio").clicked() {
+                                self.settings.export_dir.clear();
+                                self.plat.export_dir = self.export_dir_inicial.clone();
+                            }
+                        });
+                        ui.add_space(10.0);
+                        titulo(ui, "Calidad");
+                        ui.horizontal(|ui| {
+                            ui.label("MP3");
+                            for k in [128u32, 192, 256, 320] {
+                                ui.selectable_value(&mut self.settings.mp3_kbps, k, format!("{k} kbps"));
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("WAV");
+                            ui.selectable_value(&mut self.settings.wav_bits, 16, "16 bits");
+                            ui.selectable_value(&mut self.settings.wav_bits, 24, "24 bits");
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Frecuencia");
+                            ui.selectable_value(&mut self.settings.sr_export, 44_100, "44.1 kHz");
+                            ui.selectable_value(&mut self.settings.sr_export, 48_000, "48 kHz");
+                        });
+                        nota(ui, "44.1 kHz es lo normal para música; 48 kHz para video.");
+                        titulo(ui, "Nivel");
+                        ui.radio_value(&mut self.settings.normalizar, 0, "Automático (subir el volumen solo si el limitador está apagado)");
+                        ui.radio_value(&mut self.settings.normalizar, 1, "Siempre subir al máximo sin distorsionar");
+                        ui.radio_value(&mut self.settings.normalizar, 2, "Nunca tocar el volumen");
+                    }
+                    5 => {
+                        titulo(ui, "Tamaño de la interfaz");
+                        ui.horizontal(|ui| {
+                            for (z, n) in [(0.85f32, "Chico"), (1.0, "Normal"), (1.15, "Grande"), (1.3, "Muy grande")] {
+                                ui.selectable_value(&mut self.settings.zoom, z, n);
+                            }
+                        });
+                        ui.add(egui::Slider::new(&mut self.settings.zoom, 0.7..=1.6).step_by(0.05).text("Escala"));
+                        ui.add_space(10.0);
+                        titulo(ui, "Ayudas");
+                        ui.checkbox(&mut self.settings.ayudas, "Mostrar textos de ayuda junto a las herramientas");
+                    }
+                    _ => {
+                        #[cfg(windows)]
+                        {
+                            titulo(ui, "Plugins CLAP");
+                            nota(ui, "Se buscan en Archivos de programa > Common Files > CLAP y en estas carpetas:");
+                            let mut rm = None;
+                            for (i, d) in self.settings.plugin_dirs.iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    ui.label(d);
+                                    if ui.small_button("Quitar").clicked() {
+                                        rm = Some(i);
+                                    }
+                                });
+                            }
+                            if let Some(i) = rm {
+                                self.settings.plugin_dirs.remove(i);
+                            }
+                            if ui.button("Agregar carpeta…").clicked() {
+                                if let Some(d) = rfd::FileDialog::new().pick_folder() {
+                                    self.settings.plugin_dirs.push(d.to_string_lossy().to_string());
+                                }
+                            }
+                            if ui.button("Volver a buscar plugins").clicked() {
+                                self.rescan_plugins();
+                            }
+                        }
+                    }
+                }
+            });
+        });
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("Restablecer todo").on_hover_text("Vuelve a los valores de fábrica").clicked() {
+                let fav = std::mem::take(&mut self.settings.fav_dirs);
+                let plug = std::mem::take(&mut self.settings.plugin_dirs);
+                let tut = self.settings.tutorial_done;
+                self.settings = Settings { fav_dirs: fav, plugin_dirs: plug, tutorial_done: tut, ..Settings::default() };
+                self.plat.export_dir = self.export_dir_inicial.clone();
+                reiniciar_audio = true;
             }
-            if ui.button("Volver a buscar plugins").clicked() {
-                self.rescan_plugins();
-            }
+            ui.label(RichText::new("Los cambios se guardan solos.").small().color(DIM));
+        });
+        if reiniciar_audio {
+            self.reiniciar_audio();
         }
-        if format!("{before:?}") != format!("{:?}", self.settings) {
+        if antes != format!("{:?}", self.settings) {
             self.save_settings();
+        }
+    }
+
+    /// Vuelve a abrir la salida de audio con los ajustes actuales y le reenvía todo al motor.
+    pub(super) fn reiniciar_audio(&mut self) {
+        self.audio = None;
+        let abierto = match audio::start(self.p.clone(), self.status.clone(), &self.settings.salida, self.settings.buffer) {
+            Ok(a) => {
+                self.msg = format!("Audio: {}", a.device);
+                Ok(a)
+            }
+            Err(e) => {
+                // si el dispositivo elegido falla, se vuelve al de Windows
+                self.msg = format!("No se pudo abrir el audio ({e}). Se usa el de Windows.");
+                audio::start(self.p.clone(), self.status.clone(), "", 0).map_err(|_| e)
+            }
+        };
+        match abierto {
+            Ok(mut a) => {
+                self.trash_rx = a.trash.take();
+                self.audio = Some(a);
+                self.audio_err = None;
+                // el motor nuevo empieza vacío: se le reenvían los audios, las tomas y el metrónomo
+                let files: Vec<(String, Arc<Buf>)> = self.files.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                for (k, b) in files {
+                    self.cmd(Cmd::File { key: k, buf: Some(b) });
+                }
+                let takes: Vec<((u32, u32), (Arc<Vec<f32>>, f32))> = self.samples.iter().map(|(k, v)| (*k, v.clone())).collect();
+                for ((pat, ch), d) in takes {
+                    self.cmd(Cmd::Sample { pat, ch, data: Some(d) });
+                }
+                self.cmd(Cmd::Metronome(self.metro));
+                self.plugins_reload_all();
+            }
+            Err(e) => self.audio_err = Some(e),
         }
     }
 
@@ -2257,7 +3103,9 @@ impl StudioApp {
         self.send();
         self.reload_takes();
         self.plugins_reload_all();
-        self.msg = format!("Plantilla «{}» cargada ({} · {:.0} bpm). Deshacer para volver.", templates::TEMPLATES[i], self.p.key_label(), self.p.bpm);
+        self.proj_path = None;
+        self.cambios = false;
+        self.msg = format!("Proyecto nuevo: plantilla «{}» ({} · {:.0} bpm).", templates::TEMPLATES[i], self.p.key_label(), self.p.bpm);
     }
 
     fn user_dir(&self, sub: &str) -> PathBuf {
@@ -2288,7 +3136,7 @@ impl StudioApp {
             for (i, n) in templates::TEMPLATES.iter().enumerate() {
                 if ui.button(*n).clicked() {
                     ui.close();
-                    self.new_from_template(i);
+                    self.pedir(Pend::Nuevo(i));
                 }
             }
             let mine = self.list_json("plantillas");
@@ -2366,6 +3214,10 @@ impl StudioApp {
             }
         });
         ui.separator();
+        if ui.button("Ver tutorial").clicked() {
+            ui.close();
+            self.tut = Some(0);
+        }
         if ui.button("Ajustes…").clicked() {
             ui.close();
             self.open_win(Win::Settings);
@@ -2374,7 +3226,7 @@ impl StudioApp {
 
     /// Guarda una copia del proyecto cada cierto tiempo (historial de versiones).
     pub(super) fn version_tick(&mut self) {
-        if !self.version_dirty || self.last_version.elapsed() < Duration::from_secs(self.settings.version_min.max(1) as u64 * 60) {
+        if !self.settings.versiones || !self.version_dirty || self.last_version.elapsed() < Duration::from_secs(self.settings.version_min.max(1) as u64 * 60) {
             return;
         }
         self.version_dirty = false;
@@ -2402,6 +3254,21 @@ impl StudioApp {
                     Ok(_) => format!("Preset «{}» guardado.", c.name),
                     Err(e) => format!("No se pudo guardar: {e}"),
                 };
+            }
+            if matches!(c.inst, Inst::Audio | Inst::Vocal) {
+                ui.separator();
+                ui.label(RichText::new("EFECTOS DE VOZ").small().color(DIM));
+                for (i, (n, ayuda, ..)) in VOZ_FX.iter().enumerate() {
+                    if ui.button(*n).on_hover_text(*ayuda).clicked() {
+                        ui.close();
+                        self.snap();
+                        if let Some(cm) = self.p.channel_mut(id) {
+                            aplicar_voz_fx(cm, i);
+                        }
+                        self.msg = format!("Efectos de voz: {n}");
+                        self.send();
+                    }
+                }
             }
             if c.inst == Inst::Synth {
                 ui.separator();

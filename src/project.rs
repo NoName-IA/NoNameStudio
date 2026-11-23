@@ -217,6 +217,20 @@ pub struct Clip {
     pub pat: u32,
 }
 
+/// Ajustes de una pista de la playlist.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PistaP {
+    pub mute: bool,
+    pub solo: bool,
+    pub vol: f32,
+    pub pan: f32,
+}
+impl Default for PistaP {
+    fn default() -> Self {
+        PistaP { mute: false, solo: false, vol: 1.0, pan: 0.0 }
+    }
+}
+
 /// Clip de audio en la playlist (pertenece a un canal «Pista de audio»).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AudioClip {
@@ -365,6 +379,63 @@ pub const SCALES: [(&str, [bool; 12]); 11] = [
     ("Blues", [true, false, false, true, false, true, true, true, false, false, true, false]),
     ("Cromática", [true; 12]),
 ];
+/// Máscara de 12 bits con las notas de una escala (índice en SCALES) sobre una tónica.
+pub fn scale_mask(key: u8, scale: u8) -> u16 {
+    let sc = SCALES[(scale as usize).min(SCALES.len() - 1)].1;
+    let mut m = 0u16;
+    for (d, on) in sc.iter().enumerate() {
+        if *on {
+            m |= 1 << ((key as usize + d) % 12);
+        }
+    }
+    m
+}
+
+/// Tonalidad más probable de las notas del proyecto (perfiles de Krumhansl). Devuelve (tónica, escala).
+pub fn detect_key(p: &Project) -> Option<(u8, u8)> {
+    let mut h = [0f32; 12];
+    let mut total = 0.0;
+    for pat in &p.patterns {
+        for (ch, ns) in &pat.notes {
+            if p.channel(*ch).is_some_and(|c| c.inst.is_drum()) {
+                continue;
+            }
+            for n in ns {
+                h[(n.m % 12) as usize] += n.l as f32;
+                total += n.l as f32;
+            }
+        }
+    }
+    if total < 1.0 {
+        return None;
+    }
+    let mayor = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
+    let menor = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
+    let corr = |perfil: &[f32; 12], k: usize| -> f32 {
+        let mh = h.iter().sum::<f32>() / 12.0;
+        let mp = perfil.iter().sum::<f32>() / 12.0;
+        let (mut a, mut b, mut c) = (0.0, 0.0, 0.0);
+        for i in 0..12 {
+            let x = h[(i + k) % 12] - mh;
+            let y = perfil[i] - mp;
+            a += x * y;
+            b += x * x;
+            c += y * y;
+        }
+        a / (b * c).sqrt().max(1e-9)
+    };
+    let mut best = (0u8, 1u8, f32::MIN);
+    for k in 0..12 {
+        for (escala, perfil) in [(0u8, &mayor), (1u8, &menor)] {
+            let r = corr(perfil, k);
+            if r > best.2 {
+                best = (k as u8, escala, r);
+            }
+        }
+    }
+    Some((best.0, best.1))
+}
+
 pub const KEY_NAMES: [&str; 12] = ["Do", "Do#", "Re", "Mib", "Mi", "Fa", "Fa#", "Sol", "Lab", "La", "Sib", "Si"];
 
 fn default_key() -> u8 {
@@ -389,6 +460,9 @@ pub struct Project {
     pub patterns: Vec<Pattern>,
     pub playlist: Vec<Clip>,
     pub tracks: Vec<String>,
+    /// silencio, solo, volumen y paneo de cada pista de la playlist (mismo orden que `tracks`)
+    #[serde(default)]
+    pub pistas: Vec<PistaP>,
     pub next_id: u32,
     #[serde(default = "default_eq")]
     pub master_eq: [Band; 6],
@@ -424,20 +498,40 @@ pub struct Project {
     /// plugins CLAP en el master (antes del limitador)
     #[serde(default)]
     pub master_inserts: Vec<PluginSlot>,
+    /// letras y notas de la canción
+    #[serde(default)]
+    pub letras: String,
 }
 
 pub const PALETTE: [[u8; 3]; 8] = [
-    [242, 155, 56],
-    [90, 155, 224],
-    [176, 122, 224],
-    [108, 199, 122],
-    [224, 96, 90],
-    [224, 201, 74],
-    [74, 199, 192],
-    [224, 122, 184],
+    [74, 144, 255],
+    [156, 110, 255],
+    [36, 196, 178],
+    [255, 100, 168],
+    [94, 206, 112],
+    [248, 198, 62],
+    [64, 200, 255],
+    [255, 122, 96],
 ];
 
 impl Project {
+    /// Ajustes de la pista `t` (los de siempre si no se tocaron).
+    pub fn pista(&self, t: usize) -> PistaP {
+        self.pistas.get(t).copied().unwrap_or_default()
+    }
+    /// Ganancia y paneo con que suena la pista `t` en la canción (None = no suena por silencio o solo).
+    pub fn pista_suena(&self, t: usize) -> Option<(f32, f32)> {
+        let p = self.pista(t);
+        let solo = self.pistas.iter().any(|x| x.solo);
+        if p.mute || (solo && !p.solo) { None } else { Some((p.vol, p.pan)) }
+    }
+    /// Ajustes de la pista `t` para cambiarlos.
+    pub fn pista_mut(&mut self, t: usize) -> &mut PistaP {
+        if self.pistas.len() <= t {
+            self.pistas.resize(t + 1, PistaP::default());
+        }
+        &mut self.pistas[t]
+    }
     pub fn step_secs(&self) -> f64 {
         60.0 / self.bpm.max(20.0) as f64 / 4.0
     }
@@ -458,6 +552,41 @@ impl Project {
         let auds = self.audio_clips.iter().map(|c| (c.start + c.len).div_ceil(STEPS_PER_BAR)).max().unwrap_or(0);
         let auts = self.autos.iter().map(|c| (c.start + c.len).div_ceil(STEPS_PER_BAR)).max().unwrap_or(0);
         pats.max(auds).max(auts)
+    }
+    /// Notas (máscara de 12 bits, bit 0 = Do) de los canales melódicos que suenan en un paso.
+    /// `pat` = Some(id) en modo patrón; None = en la canción (playlist).
+    pub fn acorde_en(&self, pat: Option<u32>, paso: u64) -> u16 {
+        let mut m = 0u16;
+        let mut sumar = |pt: &Pattern, l: u32| {
+            for (ch, ns) in &pt.notes {
+                if self.channel(*ch).is_some_and(|c| c.inst.melodic() && !c.mute) {
+                    for n in ns {
+                        if n.s <= l && l < n.s + n.l {
+                            m |= 1 << (n.m % 12);
+                        }
+                    }
+                }
+            }
+        };
+        match pat {
+            Some(id) => {
+                if let Some(pt) = self.pattern(id) {
+                    let len = pt.len_steps().max(1) as u64;
+                    sumar(pt, (paso % len) as u32);
+                }
+            }
+            None => {
+                for cl in &self.playlist {
+                    if let Some(pt) = self.pattern(cl.pat) {
+                        let s0 = cl.bar as u64 * STEPS_PER_BAR as u64;
+                        if paso >= s0 && paso < s0 + pt.len_steps() as u64 {
+                            sumar(pt, (paso - s0) as u32);
+                        }
+                    }
+                }
+            }
+        }
+        m
     }
     pub fn in_scale(&self, m: i32) -> bool {
         SCALES[(self.scale as usize).min(SCALES.len() - 1)].1[((m - self.key as i32).rem_euclid(12)) as usize]
@@ -513,6 +642,8 @@ impl Project {
             loop_a: 0,
             loop_b: 4,
             master_inserts: vec![],
+            letras: String::new(),
+            pistas: vec![],
         }
     }
     pub fn new_id(&mut self) -> u32 {
@@ -562,6 +693,8 @@ impl Project {
             loop_a: 0,
             loop_b: 4,
             master_inserts: vec![],
+            letras: String::new(),
+            pistas: vec![],
         };
         let mk = |p: &mut Project, inst: Inst, vol: f32, pan: f32| {
             let id = p.new_id();
@@ -922,10 +1055,25 @@ pub struct TuneP {
     pub speed: f32,
     pub mix: f32,
     pub gain: f32,
+    /// notas permitidas (bit 0 = Do … bit 11 = Si); 0 = usar `key` y `scale`
+    #[serde(default)]
+    pub mask: u16,
+    /// estilo de NN Tune (índice en fx::ESTILOS)
+    #[serde(default)]
+    pub estilo: u8,
+    /// 0 = limpio (conserva el timbre), 1 = baja demora
+    #[serde(default)]
+    pub algoritmo: u8,
+    /// volumen de las voces de armonía (1 = el del estilo)
+    #[serde(default = "uno")]
+    pub mezcla: f32,
+}
+fn uno() -> f32 {
+    1.0
 }
 impl Default for TuneP {
     fn default() -> Self {
-        TuneP { on: true, key: 7, scale: 0, speed: 0.15, mix: 1.0, gain: 1.0 }
+        TuneP { on: true, key: 7, scale: 0, speed: 0.15, mix: 1.0, gain: 1.0, mask: 0, estilo: 0, algoritmo: 0, mezcla: 1.0 }
     }
 }
 

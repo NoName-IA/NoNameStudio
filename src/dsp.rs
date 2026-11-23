@@ -173,6 +173,8 @@ pub struct Voice {
     /// nota sostenida por un teclado MIDI hasta el note-off
     pub held: bool,
     smp: Option<Box<SmpState>>,
+    /// paneo propio de la voz (-1…1; lo usa el paneo de la pista de la playlist)
+    pub pan: f32,
 }
 
 /// Reproducción de un archivo (NN Sampler y clips de audio).
@@ -213,7 +215,7 @@ impl Voice {
             Inst::Synth | Inst::Vocal | Inst::Sampler | Inst::Audio | Inst::Plugin => (Biquad::default(), Biquad::default(), len.max(0.05)),
         };
         let note = m.round().clamp(0.0, 127.0) as u8;
-        Voice { ch, kind, delay, t: 0.0, end, vel, freq: mtof(m), k, d, len, ph: [0.0; 4], f1, f2, rng, m, wave: None, sample: None, spos: 0.0, srate: 1.0, done: false, note, held: false, smp: None }
+        Voice { ch, kind, delay, t: 0.0, end, vel, freq: mtof(m), k, d, len, ph: [0.0; 4], f1, f2, rng, m, wave: None, sample: None, spos: 0.0, srate: 1.0, done: false, note, held: false, smp: None, pan: 0.0 }
     }
 
     /// Voz que reproduce un archivo. `len` = duración de la nota (s); `max_t` = tope (s).

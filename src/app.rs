@@ -18,6 +18,13 @@ mod studio_ui;
 use studio_ui::*;
 #[path = "plugin_ui.rs"]
 mod plugin_ui;
+#[path = "tutorial.rs"]
+mod tutorial;
+#[path = "rec_view.rs"]
+mod rec_view;
+#[path = "retune_view.rs"]
+mod retune_view;
+use retune_view::Retune;
 use plugin_ui::*;
 use std::path::Path;
 
@@ -35,15 +42,15 @@ enum View {
     Mixer,
 }
 
-const ACCENT: Color32 = Color32::from_rgb(242, 155, 56);
-const ACCENT2: Color32 = Color32::from_rgb(255, 190, 107);
-const BG: Color32 = Color32::from_rgb(27, 30, 34);
-const PANEL: Color32 = Color32::from_rgb(36, 40, 46);
-const PANEL2: Color32 = Color32::from_rgb(44, 49, 57);
-const LINE: Color32 = Color32::from_rgb(58, 65, 75);
-const DIM: Color32 = Color32::from_rgb(139, 149, 163);
-const GREEN: Color32 = Color32::from_rgb(126, 211, 126);
-const RED: Color32 = Color32::from_rgb(224, 96, 90);
+const ACCENT: Color32 = Color32::from_rgb(61, 139, 255);
+const ACCENT2: Color32 = Color32::from_rgb(128, 182, 255);
+const BG: Color32 = Color32::from_rgb(10, 11, 14);
+const PANEL: Color32 = Color32::from_rgb(19, 21, 25);
+const PANEL2: Color32 = Color32::from_rgb(31, 34, 40);
+const LINE: Color32 = Color32::from_rgb(43, 47, 55);
+const DIM: Color32 = Color32::from_rgb(137, 145, 158);
+const GREEN: Color32 = Color32::from_rgb(58, 214, 140);
+const RED: Color32 = Color32::from_rgb(255, 76, 80);
 
 const CHORDS: [(&str, &[i32]); 10] = [
     ("Nota", &[0]),
@@ -64,7 +71,7 @@ const RH: f32 = 13.0;
 const CW: f32 = 22.0;
 const KW: f32 = 56.0;
 const BW: f32 = 46.0;
-const TH: f32 = 38.0;
+const TH: f32 = 74.0;
 
 fn nname(m: u8) -> String {
     format!("{}{}", NOTE_NAMES[(m % 12) as usize], m as i32 / 12 - 1)
@@ -159,6 +166,12 @@ pub struct StudioApp {
     version_dirty: bool,
     master_job: Option<(mpsc::Receiver<MasterRes>, usize)>,
     master_target: usize,
+    /// mastering estilo BandLab: estilo, intensidad (0 ligero, 1 normal, 2 pesado), graves/medios/agudos
+    /// y canción de referencia (nombre, sonoridad, balance de graves/medios/agudos)
+    master_estilo: usize,
+    master_int: usize,
+    master_eq3: [f32; 3],
+    master_ref: Option<(String, f32, [f32; 3])>,
     scale_snap: bool,
     sampler_sens: f32,
     auto_drag: Option<usize>,
@@ -167,6 +180,50 @@ pub struct StudioApp {
     load_hold: f32,
     plug: PlugState,
     trash_rx: Option<mpsc::Receiver<Box<dyn crate::engine::Proc>>>,
+    /// paso actual del tutorial de bienvenida
+    tut: Option<usize>,
+    tut_rects: std::collections::HashMap<&'static str, Rect>,
+    tut_base: usize,
+    tut_ok: bool,
+    /// picos (cada 10 ms) de lo que se está grabando
+    rec_peaks: Vec<f32>,
+    rec_leido: usize,
+    /// micrófono abierto solo para escucharse (sin grabar)
+    mic_mon: Option<audio::Recorder>,
+    /// panel del micrófono abierto abajo
+    mic_panel: bool,
+    /// historial reciente de la voz: (nota cantada, nota corregida) para el gráfico
+    trazo: std::collections::VecDeque<(f32, f32)>,
+    /// ancho de un compás en la playlist (zoom)
+    pl_bw: f32,
+    /// panel lateral de letras y notas
+    letras_panel: bool,
+    /// editor Retune abierto (y clip que se está analizando)
+    retune: Option<Retune>,
+    retune_cargando: Option<u32>,
+    /// archivo del proyecto (None = todavía sin guardar)
+    proj_path: Option<PathBuf>,
+    /// hay cambios sin guardar
+    cambios: bool,
+    /// acción que espera la respuesta de «¿Guardar cambios?»
+    pendiente: Option<Pend>,
+    /// copia de rescate: hay una de un cierre inesperado (se ofrece recuperarla) y cuándo se escribió la última
+    rescate: bool,
+    ultimo_rescate: Instant,
+    cerrar_ok: bool,
+    titulo: String,
+    last_auto: Instant,
+    zoom_puesto: f32,
+    ajuste_sec: usize,
+    export_dir_inicial: PathBuf,
+}
+
+/// Acciones que pueden perder cambios sin guardar.
+#[derive(Clone, Copy, PartialEq)]
+enum Pend {
+    Cerrar,
+    Nuevo(usize),
+    Abrir,
 }
 
 /// Prueba automática de la interfaz (se activa con --autotest).
@@ -179,18 +236,26 @@ impl StudioApp {
     pub fn new(cc: &eframe::CreationContext<'_>, plat: Platform) -> Self {
         setup_style(&cc.egui_ctx, plat.mobile);
         let _ = std::fs::create_dir_all(&plat.data_dir);
-        let p = std::fs::read_to_string(plat.data_dir.join("autosave.json"))
-            .ok()
-            .and_then(|s| serde_json::from_str::<Project>(&s).ok())
-            .filter(|p| p.version == 1 && !p.patterns.is_empty() && !p.channels.is_empty())
-            .unwrap_or_else(Project::demo);
+        let settings = StudioApp::load_settings(&plat.data_dir);
+        // por defecto siempre empieza un proyecto nuevo; el último solo si así está en Ajustes
+        let ultimo = if settings.abrir_ultimo {
+            std::fs::read_to_string(plat.data_dir.join("autosave.json")).ok().and_then(|s| serde_json::from_str::<Project>(&s).ok()).filter(|p| p.version == 1 && !p.patterns.is_empty() && !p.channels.is_empty())
+        } else {
+            None
+        };
+        let p = ultimo.unwrap_or_else(|| StudioApp::proyecto_nuevo(&settings));
         let status = Arc::new(Status::new());
-        let (mut audio, audio_err) = match audio::start(p.clone(), status.clone()) {
+        let (mut audio, audio_err) = match audio::start(p.clone(), status.clone(), &settings.salida, settings.buffer).or_else(|_| audio::start(p.clone(), status.clone(), "", 0)) {
             Ok(a) => (Some(a), None),
             Err(e) => (None, Some(e)),
         };
         let trash_rx = audio.as_mut().and_then(|a| a.trash.take());
-        let settings = StudioApp::load_settings(&plat.data_dir);
+        let export_dir_inicial = plat.export_dir.clone();
+        let mut plat = plat;
+        if !settings.export_dir.is_empty() && std::path::Path::new(&settings.export_dir).is_dir() {
+            plat.export_dir = PathBuf::from(&settings.export_dir);
+        }
+        let hay_rescate = plat.data_dir.join("recuperacion.json").exists();
         let (file_tx, file_rx) = mpsc::channel();
         let (midi_tx, midi_rx) = mpsc::channel();
         let logo = load_logo(&cc.egui_ctx);
@@ -272,6 +337,10 @@ impl StudioApp {
             version_dirty: false,
             master_job: None,
             master_target: 0,
+            master_estilo: 0,
+            master_int: 1,
+            master_eq3: [0.0; 3],
+            master_ref: None,
             scale_snap: false,
             sampler_sens: 0.5,
             auto_drag: None,
@@ -280,7 +349,34 @@ impl StudioApp {
             load_hold: 0.0,
             plug: PlugState::default(),
             trash_rx,
+            tut: None,
+            tut_rects: Default::default(),
+            tut_base: 0,
+            tut_ok: false,
+            rec_peaks: Vec::new(),
+            rec_leido: 0,
+            mic_mon: None,
+            mic_panel: false,
+            trazo: std::collections::VecDeque::with_capacity(400),
+            pl_bw: 72.0,
+            letras_panel: false,
+            retune: None,
+            retune_cargando: None,
+            proj_path: None,
+            cambios: false,
+            pendiente: None,
+            rescate: hay_rescate,
+            ultimo_rescate: Instant::now(),
+            cerrar_ok: false,
+            titulo: String::new(),
+            last_auto: Instant::now(),
+            zoom_puesto: 1.0,
+            ajuste_sec: 0,
+            export_dir_inicial,
         };
+        if !app.settings.tutorial_done {
+            app.tut_mostrar(0);
+        }
         app.reload_takes();
         app.plugins_list_load();
         app.plugins_reload_all();
@@ -302,6 +398,164 @@ impl StudioApp {
         self.dirty = Some(Instant::now());
         self.files_dirty = true;
         self.version_dirty = true;
+        self.cambios = true;
+        if self.settings.escucharme {
+            // por si cambió la tonalidad: el autotune en vivo la sigue
+            self.escucha_sync();
+        }
+    }
+
+    /// Proyecto nuevo según los ajustes (plantilla y tempo).
+    fn proyecto_nuevo(s: &Settings) -> Project {
+        let i = s.plantilla_nueva.min(crate::templates::TEMPLATES.len() - 1);
+        let mut p = crate::templates::build(i);
+        if i == 0 {
+            p.bpm = s.bpm_nuevo.clamp(50.0, 200.0);
+        }
+        p
+    }
+
+    /// Hace una acción que podría perder cambios, preguntando antes si hace falta.
+    fn pedir(&mut self, a: Pend) {
+        if self.cambios && self.settings.preguntar && self.autotest.is_none() {
+            self.pendiente = Some(a);
+        } else {
+            self.hacer(a);
+        }
+    }
+    fn hacer(&mut self, a: Pend) {
+        self.pendiente = None;
+        match a {
+            Pend::Cerrar => {
+                self.cerrar_ok = true;
+                if let Some(c) = &self.ctx {
+                    c.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+            Pend::Nuevo(i) => {
+                self.stop();
+                self.snap();
+                self.p = if i == usize::MAX { StudioApp::proyecto_nuevo(&self.settings) } else { crate::templates::build(i) };
+                self.fix_selection();
+                self.send();
+                self.reload_takes();
+                self.plugins_reload_all();
+                self.proj_path = None;
+                self.cambios = false;
+                self.msg = "Proyecto nuevo.".into();
+            }
+            Pend::Abrir => self.open_project_dialog(),
+        }
+    }
+
+    /// Ventana «¿Guardar los cambios?».
+    fn borrar_rescate(&mut self) {
+        let _ = std::fs::remove_file(self.plat.data_dir.join("recuperacion.json"));
+        let _ = std::fs::remove_file(self.plat.data_dir.join("recuperacion_ruta.txt"));
+    }
+
+    /// La última vez la app se cerró de golpe con cambios sin guardar: se ofrece recuperarlos.
+    fn dialogo_rescate(&mut self, ctx: &egui::Context) {
+        if !self.rescate || self.pendiente.is_some() {
+            return;
+        }
+        let mut r: Option<bool> = None;
+        egui::Area::new(egui::Id::new("resc_fondo")).order(egui::Order::Foreground).fixed_pos(ctx.content_rect().min).show(ctx, |ui| {
+            let (rr, _) = ui.allocate_exact_size(ctx.content_rect().size(), Sense::click());
+            ui.painter().rect_filled(rr, 0, Color32::from_black_alpha(150));
+        });
+        egui::Area::new(egui::Id::new("dlg_rescate")).order(egui::Order::Tooltip).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+            Frame::new().fill(PANEL).stroke(Stroke::new(1.5, ACCENT)).corner_radius(10).inner_margin(Margin::same(18)).show(ui, |ui| {
+                ui.set_width(420.0);
+                ui.label(RichText::new("¿Recuperar tu trabajo?").strong().size(18.0).color(Color32::WHITE));
+                ui.add_space(4.0);
+                ui.label(RichText::new("La última vez NoName Studio se cerró de golpe y quedaron cambios sin guardar. Hay una copia de rescate.").size(13.5));
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    if ui.add(egui::Button::new("Descartar").min_size(Vec2::new(110.0, 32.0))).clicked() {
+                        r = Some(false);
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.add(egui::Button::new(RichText::new("Recuperar").strong().color(Color32::WHITE)).fill(ACCENT).min_size(Vec2::new(110.0, 32.0))).clicked() {
+                            r = Some(true);
+                        }
+                    });
+                });
+            });
+        });
+        let Some(si) = r else { return };
+        self.rescate = false;
+        if si {
+            let ruta = self.plat.data_dir.join("recuperacion.json");
+            match std::fs::read_to_string(&ruta).ok().and_then(|s| serde_json::from_str::<Project>(&s).ok()) {
+                Some(p) if !p.patterns.is_empty() && !p.channels.is_empty() => {
+                    let archivo = std::fs::read_to_string(self.plat.data_dir.join("recuperacion_ruta.txt")).unwrap_or_default();
+                    self.hist.clear();
+                    self.p = p;
+                    self.fix_selection();
+                    self.send();
+                    self.reload_takes();
+                    self.plugins_reload_all();
+                    self.proj_path = if archivo.trim().is_empty() { None } else { Some(PathBuf::from(archivo.trim())) };
+                    // queda como cambios sin guardar: Guardar lo escribe en su archivo
+                    self.cambios = true;
+                    self.ultimo_rescate = Instant::now();
+                    self.msg = format!("Trabajo recuperado: «{}». Guárdalo para no perderlo.", self.p.name);
+                    return;
+                }
+                _ => self.msg = "La copia de rescate estaba dañada.".into(),
+            }
+        }
+        self.borrar_rescate();
+    }
+
+    fn dialogo_guardar(&mut self, ctx: &egui::Context) {
+        let Some(a) = self.pendiente else { return };
+        let que = match a {
+            Pend::Cerrar => "antes de cerrar",
+            Pend::Nuevo(_) => "antes de empezar otro proyecto",
+            Pend::Abrir => "antes de abrir otro proyecto",
+        };
+        let mut r: Option<u8> = None;
+        egui::Area::new(egui::Id::new("dlg_fondo")).order(egui::Order::Foreground).fixed_pos(ctx.content_rect().min).show(ctx, |ui| {
+            let (rr, _) = ui.allocate_exact_size(ctx.content_rect().size(), Sense::click());
+            ui.painter().rect_filled(rr, 0, Color32::from_black_alpha(150));
+        });
+        egui::Area::new(egui::Id::new("dlg_guardar")).order(egui::Order::Tooltip).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+            Frame::new().fill(PANEL).stroke(Stroke::new(1.5, ACCENT)).corner_radius(10).inner_margin(Margin::same(18)).show(ui, |ui| {
+                ui.set_width(400.0);
+                ui.label(RichText::new("¿Guardar los cambios?").strong().size(18.0).color(Color32::WHITE));
+                ui.add_space(4.0);
+                ui.label(RichText::new(format!("«{}» tiene cambios sin guardar. ¿Quieres guardarlos {que}?", self.p.name)).size(13.5));
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancelar").clicked() {
+                        r = Some(0);
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.add(egui::Button::new(RichText::new("Guardar").strong().color(Color32::WHITE)).fill(ACCENT).min_size(Vec2::new(110.0, 32.0))).clicked() {
+                            r = Some(1);
+                        }
+                        if ui.add(egui::Button::new("No guardar").min_size(Vec2::new(110.0, 32.0))).clicked() {
+                            r = Some(2);
+                        }
+                    });
+                });
+            });
+        });
+        if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            r = Some(0);
+        }
+        match r {
+            Some(0) => self.pendiente = None,
+            Some(1) => {
+                if self.guardar(false) {
+                    self.hacer(a);
+                }
+            }
+            Some(2) => self.hacer(a),
+            _ => {}
+        }
     }
     fn snap(&mut self) {
         self.hist.push(self.p.clone());
@@ -420,26 +674,67 @@ impl StudioApp {
     }
 
     // ---------- archivos ----------
+    /// Guardado automático: solo si está activado en Ajustes.
     fn autosave(&mut self) {
-        if let Some(t) = self.dirty {
-            if t.elapsed() > Duration::from_millis(1200) {
-                self.dirty = None;
-                self.plugins_store_state();
+        let min = self.settings.autoguardar_min;
+        let quieto = self.dirty.is_none_or(|t| t.elapsed() > Duration::from_millis(1500));
+        // copia de rescate escondida (no toca tus archivos): solo sirve si la app se cierra de golpe
+        if !self.rescate {
+            let ruta = self.plat.data_dir.join("recuperacion.json");
+            if self.cambios && quieto && self.ultimo_rescate.elapsed() > Duration::from_secs(40) {
+                self.ultimo_rescate = Instant::now();
                 if let Ok(s) = serde_json::to_string(&self.p) {
-                    let _ = std::fs::write(self.plat.data_dir.join("autosave.json"), s);
+                    let _ = std::fs::write(&ruta, s);
+                    let _ = std::fs::write(self.plat.data_dir.join("recuperacion_ruta.txt"), self.proj_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default());
                 }
+            } else if !self.cambios && self.ultimo_rescate.elapsed() > Duration::from_secs(2) {
+                // ya está guardado (o se descartó): la copia de rescate sobra (se revisa cada 2 s)
+                self.ultimo_rescate = Instant::now();
+                if ruta.exists() {
+                    self.borrar_rescate();
+                }
+            }
+        }
+        if min == 0 || !self.cambios || !quieto || self.last_auto.elapsed() < Duration::from_secs(min as u64 * 60) {
+            return;
+        }
+        self.last_auto = Instant::now();
+        self.dirty = None;
+        if self.proj_path.is_some() {
+            self.guardar(false);
+        } else {
+            self.plugins_store_state();
+            if let Ok(s) = serde_json::to_string(&self.p) {
+                let _ = std::fs::write(self.plat.data_dir.join("recuperacion.json"), s);
             }
         }
     }
     fn save_project(&mut self) {
+        self.guardar(false);
+    }
+    /// Guarda en el archivo del proyecto (o pide dónde si es nuevo o `como`). Devuelve si se guardó.
+    fn guardar(&mut self, como: bool) -> bool {
         self.plugins_store_state();
         let json = match serde_json::to_string_pretty(&self.p) {
             Ok(s) => s,
             Err(e) => {
                 self.msg = format!("Error al guardar: {e}");
-                return;
+                return false;
             }
         };
+        if let (false, Some(path)) = (como, self.proj_path.clone()) {
+            return match std::fs::write(&path, &json) {
+                Ok(_) => {
+                    self.cambios = false;
+                    self.msg = format!("Guardado: {}", path.display());
+                    true
+                }
+                Err(e) => {
+                    self.msg = format!("No se pudo guardar: {e}");
+                    false
+                }
+            };
+        }
         #[cfg(not(target_os = "android"))]
         let path = rfd::FileDialog::new()
             .set_title("Guardar proyecto")
@@ -452,11 +747,20 @@ impl StudioApp {
             let _ = std::fs::create_dir_all(&self.plat.export_dir);
             Some(self.plat.export_dir.join(format!("{}.nns.json", export::safe_name(&self.p.name))))
         };
-        if let Some(path) = path {
-            self.msg = match std::fs::write(&path, json) {
-                Ok(_) => format!("Proyecto guardado: {}", path.display()),
-                Err(e) => format!("No se pudo guardar: {e}"),
-            };
+        match path {
+            Some(path) => match std::fs::write(&path, json) {
+                Ok(_) => {
+                    self.msg = format!("Proyecto guardado: {}", path.display());
+                    self.proj_path = Some(path);
+                    self.cambios = false;
+                    true
+                }
+                Err(e) => {
+                    self.msg = format!("No se pudo guardar: {e}");
+                    false
+                }
+            },
+            None => false,
         }
     }
     fn open_project_dialog(&mut self) {
@@ -485,12 +789,16 @@ impl StudioApp {
     fn open_path(&mut self, path: PathBuf) {
         match std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str::<Project>(&s).ok()) {
             Some(p) if !p.patterns.is_empty() && !p.channels.is_empty() => {
-                self.snap();
+                // otro archivo: el historial del proyecto anterior no se puede deshacer sobre este
+                // (si no, Guardar escribiría el proyecto viejo encima del archivo recién abierto)
+                self.hist.clear();
                 self.p = p;
                 self.fix_selection();
                 self.send();
                 self.reload_takes();
                 self.plugins_reload_all();
+                self.proj_path = Some(path.clone());
+                self.cambios = false;
                 self.msg = format!("Proyecto «{}» abierto.", self.p.name);
             }
             _ => self.msg = "Ese archivo no es un proyecto de NoName Studio.".into(),
@@ -508,8 +816,9 @@ impl StudioApp {
         crate::media::ensure(&self.p, &self.plat.data_dir, &mut bank.files);
         let mut setup = self.export_setup();
         let (p, dir, pr, ca) = (self.p.clone(), self.plat.export_dir.clone(), progress.clone(), cancel.clone());
+        let opts = export::Opts { sr: self.settings.sr_export, kbps: self.settings.mp3_kbps, bits: self.settings.wav_bits, norm: self.settings.normalizar };
         std::thread::spawn(move || {
-            let _ = tx.send(export::export_full(&p, &bank, &dir, fmt, &pr, &ca, &mut setup));
+            let _ = tx.send(export::export_full(&p, &bank, &dir, fmt, &opts, &pr, &ca, &mut setup));
         });
         self.msg = if fmt == Format::Stems { format!("Renderizando stems ({} canales)…", self.p.channels.len()) } else { format!("Renderizando canción ({} compases)…", self.p.song_bars()) };
         self.job = Some(ExportJob { progress, cancel, rx, fmt, started: Instant::now() });
@@ -601,7 +910,14 @@ impl StudioApp {
             ui.label(RichText::new("NoName Studio").strong().size(16.0).color(Color32::WHITE));
             ui.add_space(6.0);
             let playing = self.playing();
-            if icon_button(ui, if playing { Ic::Pause } else { Ic::Play }, Vec2::new(40.0, 28.0), false, if playing { Some(GREEN) } else { None }).on_hover_text("Reproducir / pausar (Espacio)").clicked() {
+            let r = icon_button(ui, if playing { Ic::Pause } else { Ic::Play }, Vec2::new(40.0, 28.0), false, if playing { Some(ACCENT) } else { None });
+            if playing {
+                let k = (ui.input(|i| i.time) as f32 * 3.0).sin() * 0.5 + 0.5;
+                ui.painter().rect_stroke(r.rect.expand(2.0 + 2.0 * k), 11, Stroke::new(1.5, ACCENT.gamma_multiply(0.25 + 0.35 * (1.0 - k))), StrokeKind::Outside);
+            }
+            self.tut_mark("play", r.rect);
+            let play_rect = r.rect;
+            if r.on_hover_text("Reproducir / pausar (Espacio)").clicked() {
                 self.toggle_play();
             }
             if icon_button(ui, Ic::Stop, Vec2::new(40.0, 28.0), false, None).on_hover_text("Detener").clicked() {
@@ -617,10 +933,17 @@ impl StudioApp {
                     self.rec_track_start();
                 }
             }
+            self.rec_indicator(ui);
+            self.micro_boton(ui);
+            if ui.add(egui::Button::selectable(self.letras_panel, RichText::new("Letras").size(12.5)).min_size(Vec2::new(0.0, 28.0))).on_hover_text("Escribe la letra y notas de la canción (se guardan en el proyecto)").clicked() {
+                self.letras_panel = !self.letras_panel;
+            }
             if ui.add(egui::Button::selectable(!self.song_mode, "PAT").min_size(Vec2::new(44.0, 28.0))).on_hover_text("Patrón en bucle").clicked() {
                 self.set_song_mode(false);
             }
-            if ui.add(egui::Button::selectable(self.song_mode, "SONG").min_size(Vec2::new(50.0, 28.0))).on_hover_text("Canción completa (playlist)").clicked() {
+            let r = ui.add(egui::Button::selectable(self.song_mode, "SONG").min_size(Vec2::new(50.0, 28.0)));
+            self.tut_mark("song", r.rect.union(play_rect));
+            if r.on_hover_text("Canción completa (playlist)").clicked() {
                 self.set_song_mode(true);
             }
             if icon_button(ui, Ic::Metro, Vec2::new(36.0, 28.0), self.metro, None).on_hover_text("Metrónomo (M)").clicked() {
@@ -630,7 +953,7 @@ impl StudioApp {
             // LCD
             let s = if playing { self.status.pos().max(0.0) as u64 } else { 0 };
             let lcd = format!("{:03}:{}:{:02}", s / 16 + 1, (s / 4) % 4 + 1, s % 4 + 1);
-            Frame::new().fill(Color32::from_rgb(13, 16, 18)).corner_radius(5).inner_margin(Margin::symmetric(10, 4)).show(ui, |ui| {
+            Frame::new().fill(Color32::from_rgb(11, 11, 13)).corner_radius(5).inner_margin(Margin::symmetric(10, 4)).show(ui, |ui| {
                 ui.label(RichText::new(lcd).monospace().size(16.0).color(ACCENT2));
             });
             ui.label(RichText::new("TEMPO").small().color(DIM));
@@ -666,30 +989,49 @@ impl StudioApp {
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let exporting = self.job.as_ref().map(|j| (j.progress.load(Ordering::Relaxed), j.fmt));
-                let label = match exporting {
-                    Some((pr, f)) => format!("Exportando {}%{}", pr / 10, match f { Format::Wav => " (WAV)", Format::Stems => " (stems)", _ => "" }),
-                    None => "Exportar MP3".into(),
-                };
-                let b = egui::Button::new(RichText::new(label).strong().color(Color32::from_rgb(27, 30, 34))).fill(ACCENT).min_size(Vec2::new(124.0, 28.0));
-                if ui.add_enabled(exporting.is_none(), b).on_hover_text("Renderiza la canción completa a MP3 320 kbps").clicked() {
-                    self.start_export(Format::Mp3);
+                match exporting {
+                    Some((pr, f)) => {
+                        let label = format!("Exportando {}%{}", pr / 10, match f { Format::Wav => " (WAV)", Format::Stems => " (pistas)", _ => "" });
+                        let b = egui::Button::new(RichText::new(label).strong().color(Color32::WHITE)).fill(ACCENT).min_size(Vec2::new(124.0, 28.0));
+                        let r = ui.add_enabled(false, b);
+                        self.tut_mark("export", r.rect);
+                    }
+                    None => {
+                        let b = egui::Button::new(RichText::new("Exportar     ").strong().color(Color32::WHITE)).fill(ACCENT).min_size(Vec2::new(124.0, 28.0));
+                        let (r, _) = egui::containers::menu::MenuButton::from_button(b).ui(ui, |ui| self.export_menu(ui));
+                        // flechita dibujada (la fuente no trae el carácter)
+                        let c = Pos2::new(r.rect.right() - 16.0, r.rect.center().y);
+                        ui.painter().add(egui::Shape::convex_polygon(vec![c + Vec2::new(-5.0, -2.5), c + Vec2::new(5.0, -2.5), c + Vec2::new(0.0, 3.5)], Color32::from_rgb(21, 21, 25), Stroke::NONE));
+                        self.tut_mark("export", r.rect);
+                    }
                 }
                 let lufs = self.lufs_text();
                 if ui.add(egui::Button::new(RichText::new(lufs).monospace().size(12.0).color(ACCENT2)).min_size(Vec2::new(84.0, 28.0))).on_hover_text("Sonoridad (corto plazo). Clic: NN Master y mastering con un clic").clicked() {
                     self.open_win(Win::Master);
                 }
                 ui.label(RichText::new(format!("CPU {:.0}%", self.load_hold * 100.0)).small().color(if self.load_hold > 0.8 { RED } else { DIM }));
+                if icon_button(ui, Ic::Gear, Vec2::new(34.0, 28.0), false, None).on_hover_text("Configuración").clicked() {
+                    self.open_win(Win::Settings);
+                }
                 ui.menu_button("Archivo", |ui| {
-                    if ui.button("Guardar proyecto…  (Ctrl+S)").clicked() {
+                    if ui.button("Nuevo proyecto").clicked() {
                         ui.close();
-                        self.save_project();
+                        self.pedir(Pend::Nuevo(usize::MAX));
                     }
                     if ui.button("Abrir proyecto…").clicked() {
                         ui.close();
-                        self.open_project_dialog();
+                        self.pedir(Pend::Abrir);
+                    }
+                    if ui.button("Guardar  (Ctrl+S)").clicked() {
+                        ui.close();
+                        self.guardar(false);
+                    }
+                    if ui.button("Guardar como…").clicked() {
+                        ui.close();
+                        self.guardar(true);
                     }
                     ui.separator();
-                    if ui.add_enabled(self.job.is_none(), egui::Button::new("Exportar WAV (16 bits)")).clicked() {
+                    if ui.add_enabled(self.job.is_none(), egui::Button::new(format!("Exportar WAV ({} bits)", self.settings.wav_bits))).clicked() {
                         ui.close();
                         self.start_export(Format::Wav);
                     }
@@ -714,6 +1056,44 @@ impl StudioApp {
         });
     }
 
+    /// Opciones del botón «Exportar».
+    fn export_menu(&mut self, ui: &mut Ui) {
+        ui.set_min_width(290.0);
+        ui.set_max_width(290.0);
+        let mut opcion = |ui: &mut Ui, titulo: &str, detalle: &str| -> bool {
+            let r = ui.add(egui::Button::new(RichText::new(titulo).strong()).min_size(Vec2::new(ui.available_width(), 26.0)));
+            ui.label(RichText::new(detalle).small().color(DIM));
+            ui.add_space(4.0);
+            r.clicked()
+        };
+        ui.label(RichText::new("GUARDAR LA CANCIÓN").small().color(DIM));
+        let mp3 = format!("Archivo liviano para compartir o subir ({} kbps).", self.settings.mp3_kbps);
+        if opcion(ui, "Canción en MP3", &mp3) {
+            ui.close();
+            self.start_export(Format::Mp3);
+        }
+        if opcion(ui, "Canción en WAV", "Calidad completa, sin compresión.") {
+            ui.close();
+            self.start_export(Format::Wav);
+        }
+        if opcion(ui, "Pistas separadas", "Un WAV por cada canal, para mezclar en otro programa.") {
+            ui.close();
+            self.start_export(Format::Stems);
+        }
+        if opcion(ui, "Patrón actual en MIDI", "Solo las notas, para usarlas en otro programa.") {
+            ui.close();
+            self.export_midi();
+        }
+        ui.separator();
+        if opcion(ui, "Masterizar antes de exportar…", "Deja la canción al volumen de las plataformas.") {
+            ui.close();
+            self.open_win(Win::Master);
+        }
+        let carpeta = self.plat.export_dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let carpeta = if carpeta.eq_ignore_ascii_case("Desktop") { "tu Escritorio".to_string() } else if carpeta.eq_ignore_ascii_case("Music") { "tu carpeta Música".to_string() } else { format!("la carpeta «{carpeta}»") };
+        ui.label(RichText::new(format!("Se guarda en {carpeta}.")).small().color(DIM)).on_hover_text(self.plat.export_dir.display().to_string());
+    }
+
     // ---------- lista de patrones ----------
     fn pattern_list(&mut self, ui: &mut Ui) {
         ui.label(RichText::new("PATRONES").small().color(DIM));
@@ -723,7 +1103,7 @@ impl StudioApp {
             let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::click());
             let painter = ui.painter();
             if sel {
-                painter.rect(r, 5, Color32::from_rgb(46, 42, 36), Stroke::new(1.0, ACCENT), StrokeKind::Inside);
+                painter.rect(r, 5, Color32::from_rgb(28, 29, 33), Stroke::new(1.0, ACCENT), StrokeKind::Inside);
             } else if resp.hovered() {
                 painter.rect_filled(r, 5, PANEL2);
             }
@@ -789,10 +1169,14 @@ impl StudioApp {
 
     // ---------- playlist ----------
     fn playlist(&mut self, ui: &mut Ui) {
-        egui::Panel::left("patlist").resizable(true).default_size(190.0).min_size(150.0).frame(Frame::new().fill(Color32::from_rgb(31, 35, 40)).inner_margin(6)).show(ui, |ui| {
+        egui::Panel::left("patlist").resizable(true).default_size(190.0).min_size(150.0).frame(Frame::new().fill(Color32::from_rgb(24, 25, 29)).inner_margin(6)).show(ui, |ui| {
             ui.horizontal(|ui| {
                 for (i, n) in [(0u8, "Patrones"), (1, "Navegador")] {
-                    if ui.add(egui::Button::selectable(self.left_tab == i, n)).clicked() {
+                    let r = ui.add(egui::Button::selectable(self.left_tab == i, n));
+                    if i == 1 {
+                        self.tut_mark("browser", r.rect);
+                    }
+                    if r.clicked() {
                         self.left_tab = i;
                     }
                 }
@@ -853,7 +1237,9 @@ impl StudioApp {
                         _ => {}
                     }
                 }
-                ui.label(RichText::new("Clic: paso · clic derecho: golpe suave · arrastrar arriba/abajo: velocidad · nombre: piano roll").small().color(DIM));
+                if self.settings.ayudas {
+                    ui.label(RichText::new("Clic: paso · clic derecho: golpe suave · arrastrar arriba/abajo: velocidad · nombre: piano roll").small().color(DIM));
+                }
             });
         });
         let cur_step = self.local_step().map(|s| s.floor() as usize);
@@ -864,7 +1250,9 @@ impl StudioApp {
                 self.rack_row(ui, id, cur_step);
             }
             ui.add_space(30.0);
-            ui.label(RichText::new("   Arrastra aquí un audio desde el navegador para crear un canal NN Sampler.").small().color(DIM));
+            if self.settings.ayudas {
+                ui.label(RichText::new("   Arrastra aquí un audio desde el navegador para crear un canal NN Sampler.").small().color(DIM));
+            }
         });
         let resp = ui.interact(out.inner_rect, egui::Id::new("rackdrop"), Sense::hover());
         if let Some(path) = resp.dnd_release_payload::<PathBuf>() {
@@ -881,7 +1269,7 @@ impl StudioApp {
             ui.add_space(8.0);
             ui.spacing_mut().slider_width = 52.0;
             let (r, led) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
-            ui.painter().circle(r.center(), 6.5, if c.mute { Color32::from_rgb(56, 64, 58) } else { GREEN }, Stroke::new(1.0, Color32::BLACK));
+            ui.painter().circle(r.center(), 6.5, if c.mute { Color32::from_rgb(40, 42, 48) } else { GREEN }, Stroke::new(1.0, Color32::BLACK));
             if led.on_hover_text("Silenciar").clicked() {
                 self.snap();
                 if let Some(cm) = self.p.channel_mut(id) {
@@ -890,7 +1278,11 @@ impl StudioApp {
                 self.send();
             }
             let nb = egui::Button::selectable(self.sel_ch == id, RichText::new(&c.name)).min_size(Vec2::new(110.0, 28.0));
-            if ui.add(nb).on_hover_text(c.inst.name()).clicked() {
+            let r = ui.add(nb);
+            if self.tut_melo_id() == Some(id) {
+                self.tut_mark("melo", r.rect.intersect(ui.clip_rect()));
+            }
+            if r.on_hover_text(c.inst.name()).clicked() {
                 self.sel_ch = id;
                 if c.inst == Inst::Vocal {
                     self.open_win(Win::Tune(id));
@@ -931,7 +1323,7 @@ impl StudioApp {
             if c.inst == Inst::Vocal {
                 let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 28.0), Sense::click());
                 let painter = ui.painter_at(rect);
-                painter.rect_filled(rect, 3, Color32::from_rgb(47, 40, 44));
+                painter.rect_filled(rect, 3, Color32::from_rgb(30, 31, 35));
                 let recording = self.rec.as_ref().is_some_and(|r| r.ch == id);
                 match self.takes.get(&(pat.id, id)) {
                     Some(v) if !recording => {
@@ -944,9 +1336,15 @@ impl StudioApp {
                             painter.vline(x, (rect.center().y - h)..=(rect.center().y + h), Stroke::new(1.0, Color32::from_rgb(224, 122, 184)));
                         }
                     }
+                    _ if recording => {
+                        // forma de onda en vivo sobre el largo del patrón
+                        painter.rect_filled(rect, 3, Color32::from_rgb(20, 22, 74));
+                        let total = (pat.len_steps() as f64 * self.p.step_secs()) as f32;
+                        self.rec_draw(&painter, rect, rect.width() / total.max(0.1), 0.0, total);
+                        painter.text(rect.left_top() + Vec2::new(6.0, 2.0), Align2::LEFT_TOP, "GRABANDO", FontId::proportional(10.0), Color32::WHITE);
+                    }
                     _ => {
-                        let t = if recording { "Grabando… canta sobre el beat" } else { "Sin toma — toca para abrir NN Tune y grabar con el micrófono" };
-                        painter.text(rect.left_center() + Vec2::new(8.0, 0.0), Align2::LEFT_CENTER, t, FontId::proportional(11.0), if recording { RED } else { DIM });
+                        painter.text(rect.left_center() + Vec2::new(8.0, 0.0), Align2::LEFT_CENTER, "Sin toma — toca para abrir NN Tune y grabar con el micrófono", FontId::proportional(11.0), DIM);
                     }
                 }
                 if resp.clicked() {
@@ -955,9 +1353,9 @@ impl StudioApp {
             } else if c.inst == Inst::Audio {
                 let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 28.0), Sense::click());
                 let painter = ui.painter_at(rect);
-                painter.rect_filled(rect, 3, Color32::from_rgb(36, 50, 58));
+                painter.rect_filled(rect, 3, Color32::from_rgb(33, 34, 39));
                 let n = self.p.audio_clips.iter().filter(|a| a.ch == id).count();
-                let t = if n == 0 { "Pista de audio — importa o graba (●) para crear clips en la playlist".to_string() } else { format!("Pista de audio — {n} clips en la playlist") };
+                let t = if n == 0 { "Pista de audio — importa un audio o graba con el botón rojo para crear clips en la playlist".to_string() } else { format!("Pista de audio — {n} clips en la playlist") };
                 painter.text(rect.left_center() + Vec2::new(8.0, 0.0), Align2::LEFT_CENTER, t, FontId::proportional(11.0), Color32::from_rgb(150, 200, 220));
                 if resp.clicked() {
                     self.sel_ch = id;
@@ -965,18 +1363,26 @@ impl StudioApp {
                 }
             } else if c.inst.uses_steps() && !pat.notes.get(&id).is_some_and(|v| !v.is_empty()) {
                 let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 28.0), Sense::click_and_drag());
+                if self.tut_kick_id() == Some(id) {
+                    self.tut_mark("kick", rect.intersect(ui.clip_rect()));
+                }
                 let painter = ui.painter_at(rect);
                 let steps = pat.steps.get(&id).cloned().unwrap_or_default();
                 for i in 0..n {
                     let r = Rect::from_min_size(Pos2::new(rect.left() + step_x(i), rect.top()), Vec2::new(22.0, 28.0));
-                    painter.rect_filled(r, 3, if (i / 4) % 2 == 1 { Color32::from_rgb(69, 75, 85) } else { Color32::from_rgb(58, 63, 71) });
+                    painter.rect_filled(r, 3, if (i / 4) % 2 == 1 { Color32::from_rgb(52, 53, 61) } else { Color32::from_rgb(43, 45, 51) });
                     let v = steps.get(i).copied().unwrap_or(0.0);
+                    let suena = cur_step == Some(i);
                     if v > 0.0 {
                         let h = 28.0 * v.clamp(0.08, 1.0);
-                        painter.rect_filled(Rect::from_min_max(Pos2::new(r.left(), r.bottom() - h), r.right_bottom()), 3, ACCENT);
+                        let col = if suena { ACCENT2 } else { ACCENT };
+                        if suena {
+                            painter.rect_filled(r.expand(2.0), 5, ACCENT.gamma_multiply(0.35));
+                        }
+                        painter.rect_filled(Rect::from_min_max(Pos2::new(r.left(), r.bottom() - h), r.right_bottom()), 4, col);
                     }
-                    if cur_step == Some(i) {
-                        painter.rect_stroke(r, 3, Stroke::new(2.0, Color32::from_white_alpha(110)), StrokeKind::Inside);
+                    if suena {
+                        painter.rect_stroke(r, 4, Stroke::new(1.5, Color32::from_white_alpha(150)), StrokeKind::Inside);
                     }
                 }
                 let hit = |x: f32| (0..n).find(|&i| {
@@ -1029,7 +1435,7 @@ impl StudioApp {
             } else {
                 let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 28.0), Sense::click());
                 let painter = ui.painter_at(rect);
-                painter.rect_filled(rect, 3, Color32::from_rgb(47, 52, 60));
+                painter.rect_filled(rect, 3, Color32::from_rgb(36, 37, 43));
                 let ns = pat.notes.get(&id).cloned().unwrap_or_default();
                 if ns.is_empty() {
                     painter.text(rect.left_center() + Vec2::new(8.0, 0.0), Align2::LEFT_CENTER, "Vacío — toca para escribir notas en el piano roll", FontId::proportional(11.0), DIM);
@@ -1236,6 +1642,7 @@ impl StudioApp {
         };
         egui::Panel::bottom("vel").exact_size(74.0).frame(Frame::new().fill(BG)).show(ui, |ui| self.velocity_lane(ui, ch));
         egui::CentralPanel::default().frame(Frame::new().fill(PANEL)).show(ui, |ui| {
+            self.tut_mark("roll", ui.max_rect());
             let pat = self.cur_pat().clone();
             let steps = pat.len_steps();
             let rows = (HIGH - LOW + 1) as f32;
@@ -1257,18 +1664,18 @@ impl StudioApp {
                     let y = row_y(m);
                     let pc = (m % 12) as usize;
                     let col = if self.p.in_scale(m as i32) {
-                        if pc == key as usize % 12 { Color32::from_rgb(74, 60, 44) } else { Color32::from_rgb(54, 60, 69) }
+                        if pc == key as usize % 12 { Color32::from_rgb(26, 45, 78) } else { Color32::from_rgb(41, 43, 49) }
                     } else if is_black(m) {
-                        Color32::from_rgb(31, 34, 38)
+                        Color32::from_rgb(23, 24, 28)
                     } else {
-                        Color32::from_rgb(37, 41, 46)
+                        Color32::from_rgb(28, 29, 33)
                     };
                     painter.rect_filled(Rect::from_min_size(Pos2::new(gx, y), Vec2::new(steps as f32 * CW, RH)), 0, col);
-                    painter.hline(gx..=rect.right(), y + RH - 0.5, Stroke::new(1.0, Color32::from_rgb(29, 32, 36)));
+                    painter.hline(gx..=rect.right(), y + RH - 0.5, Stroke::new(1.0, Color32::from_rgb(22, 23, 26)));
                 }
                 for s in 0..=steps {
                     let x = gx + s as f32 * CW;
-                    let (w, c) = if s % 16 == 0 { (2.0, Color32::from_rgb(14, 16, 18)) } else if s % 4 == 0 { (1.0, Color32::from_rgb(26, 29, 33)) } else { (1.0, Color32::from_rgb(36, 40, 45)) };
+                    let (w, c) = if s % 16 == 0 { (2.0, Color32::from_rgb(11, 11, 14)) } else if s % 4 == 0 { (1.0, Color32::from_rgb(20, 21, 24)) } else { (1.0, Color32::from_rgb(27, 28, 33)) };
                     painter.vline(x, rect.top()..=rect.bottom(), Stroke::new(w, c));
                 }
                 // notas fantasma de otros canales
@@ -1287,7 +1694,7 @@ impl StudioApp {
                     painter.rect_filled(r, 2, c32(pat.color).gamma_multiply(a));
                     painter.rect_filled(Rect::from_min_max(Pos2::new(r.right() - 4.0, r.top() + 1.0), Pos2::new(r.right() - 1.0, r.bottom() - 1.0)), 1, Color32::from_black_alpha(130));
                     if r.width() > 34.0 {
-                        painter.text(r.left_center() + Vec2::new(3.0, 0.0), Align2::LEFT_CENTER, nname(n.m), FontId::proportional(9.0), Color32::from_rgb(17, 17, 17));
+                        painter.text(r.left_center() + Vec2::new(3.0, 0.0), Align2::LEFT_CENTER, nname(n.m), FontId::proportional(9.0), Color32::from_rgb(12, 12, 14));
                     }
                 }
                 if let Some(ls) = self.local_step() {
@@ -1298,13 +1705,13 @@ impl StudioApp {
                 for m in LOW..=HIGH {
                     let y = row_y(m);
                     let r = Rect::from_min_size(Pos2::new(kx, y), Vec2::new(KW, RH));
-                    painter.rect_filled(r, 0, if is_black(m) { Color32::from_rgb(27, 29, 32) } else { Color32::from_rgb(232, 232, 232) });
+                    painter.rect_filled(r, 0, if is_black(m) { Color32::from_rgb(20, 21, 24) } else { Color32::from_rgb(232, 232, 232) });
                     painter.hline(kx..=kx + KW, y + RH - 0.5, Stroke::new(1.0, Color32::from_black_alpha(80)));
                     if self.p.in_scale(m as i32) {
                         painter.rect_filled(Rect::from_min_size(Pos2::new(kx + KW - 5.0, y), Vec2::new(5.0, RH)), 0, if m % 12 == key % 12 { ACCENT } else { ACCENT.gamma_multiply(0.4) });
                     }
                     if m % 12 == 0 || m % 12 == key % 12 {
-                        painter.text(Pos2::new(kx + 4.0, y + RH / 2.0), Align2::LEFT_CENTER, nname(m), FontId::proportional(9.5), if is_black(m) { Color32::LIGHT_GRAY } else { Color32::from_rgb(40, 40, 40) });
+                        painter.text(Pos2::new(kx + 4.0, y + RH / 2.0), Align2::LEFT_CENTER, nname(m), FontId::proportional(9.5), if is_black(m) { Color32::LIGHT_GRAY } else { Color32::from_rgb(27, 28, 32) });
                     }
                 }
                 self.roll_input(ui, &resp, rect, kx, ch, steps);
@@ -1438,14 +1845,14 @@ impl StudioApp {
         let (rect, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0, BG);
-        painter.hline(rect.left()..=rect.right(), rect.top() + 0.5, Stroke::new(2.0, Color32::from_rgb(17, 17, 17)));
+        painter.hline(rect.left()..=rect.right(), rect.top() + 0.5, Stroke::new(2.0, Color32::from_rgb(12, 12, 14)));
         let pat = self.cur_pat().clone();
         let gx = rect.left() + KW - self.roll_x;
         let h = rect.height() - 10.0;
         for s in (0..=pat.len_steps()).step_by(4) {
             let x = gx + s as f32 * CW;
             if x > rect.left() + KW {
-                painter.vline(x, rect.top()..=rect.bottom(), Stroke::new(1.0, if s % 16 == 0 { Color32::from_rgb(14, 16, 18) } else { Color32::from_rgb(38, 42, 48) }));
+                painter.vline(x, rect.top()..=rect.bottom(), Stroke::new(1.0, if s % 16 == 0 { Color32::from_rgb(11, 11, 14) } else { Color32::from_rgb(29, 30, 34) }));
             }
         }
         if let Some(ns) = pat.notes.get(&ch) {
@@ -1459,7 +1866,7 @@ impl StudioApp {
                 painter.circle_filled(Pos2::new(x, top), 3.5, c32(pat.color));
             }
         }
-        painter.rect_filled(Rect::from_min_size(rect.min, Vec2::new(KW, rect.height())), 0, Color32::from_rgb(31, 34, 38));
+        painter.rect_filled(Rect::from_min_size(rect.min, Vec2::new(KW, rect.height())), 0, Color32::from_rgb(23, 24, 28));
         painter.text(rect.left_top() + Vec2::new(6.0, 8.0), Align2::LEFT_TOP, "VEL.", FontId::proportional(10.0), DIM);
         if resp.drag_started() || resp.clicked() {
             self.snap();
@@ -1510,7 +1917,7 @@ impl StudioApp {
         let mut touched = false;
         let mut started = false;
         let (mut open_eq, mut open_comp, mut open_fx) = (false, false, false);
-        Frame::new().fill(Color32::from_rgb(30, 34, 39)).stroke(Stroke::new(1.0, Color32::from_rgb(17, 17, 17))).corner_radius(6).inner_margin(6).show(ui, |ui| {
+        Frame::new().fill(Color32::from_rgb(23, 24, 28)).stroke(Stroke::new(1.0, Color32::from_rgb(12, 12, 14))).corner_radius(6).inner_margin(6).show(ui, |ui| {
             ui.set_width(96.0);
             ui.vertical_centered(|ui| {
                 ui.label(RichText::new(&c.name).strong().size(12.0));
@@ -1617,7 +2024,7 @@ impl StudioApp {
     }
 
     fn master_strip(&mut self, ui: &mut Ui) {
-        Frame::new().fill(Color32::from_rgb(39, 34, 25)).stroke(Stroke::new(1.0, Color32::from_rgb(90, 61, 20))).corner_radius(6).inner_margin(6).show(ui, |ui| {
+        Frame::new().fill(Color32::from_rgb(22, 23, 27)).stroke(Stroke::new(1.0, Color32::from_rgb(12, 46, 94))).corner_radius(6).inner_margin(6).show(ui, |ui| {
             ui.set_width(104.0);
             ui.vertical_centered(|ui| {
                 ui.label(RichText::new("Master").strong().size(12.0));
@@ -1632,7 +2039,7 @@ impl StudioApp {
                     }
                 });
                 let mut vin = self.p.vinyl;
-                let r = knob(ui, &mut vin, 0.0, 1.0, 0.5, "Vinilo", |v| format!("{:.0}%", v * 100.0));
+                let r = knob(ui, &mut vin, 0.0, 1.0, 0.0, "Vinilo", |v| format!("{:.0}%", v * 100.0));
                 if r.drag_started() {
                     self.snap();
                 }
@@ -1675,8 +2082,12 @@ impl StudioApp {
             };
             for &(v, n) in tabs {
                 let sel = self.view == v || (!compact && v == View::Rack && self.view == View::Playlist);
-                let b = egui::Button::selectable(sel, RichText::new(n).color(if sel { ACCENT2 } else { Color32::LIGHT_GRAY })).min_size(Vec2::new(if compact { 0.0 } else { 120.0 }, 28.0));
-                if ui.add(b).clicked() {
+                let b = egui::Button::selectable(sel, RichText::new(n).color(if sel { Color32::WHITE } else { Color32::LIGHT_GRAY })).min_size(Vec2::new(if compact { 0.0 } else { 120.0 }, 28.0));
+                let r = ui.add(b);
+                if v == View::Mixer {
+                    self.tut_mark("mixer", r.rect);
+                }
+                if r.clicked() {
                     self.view = v;
                     if v == View::Roll {
                         self.roll_center = true;
@@ -1726,6 +2137,14 @@ impl StudioApp {
         let Some(t) = &mut self.autotest else { return };
         t.frame += 1;
         let f = t.frame;
+        if f == 1 {
+            self.tut = None;
+            if self.p.song_bars() == 0 {
+                self.p = Project::demo();
+                self.fix_selection();
+                self.send();
+            }
+        }
         match f {
             5 => self.play(0),
             40 => self.view = View::Roll,
@@ -1776,6 +2195,7 @@ impl eframe::App for StudioApp {
         self.load_hold = f32::from_bits(self.status.load.load(Ordering::Relaxed));
         let inp = f32::from_bits(self.status.input.swap(0, Ordering::Relaxed));
         self.in_meter = inp.max(self.in_meter * 0.9);
+        self.rec_update();
         if let Some(r) = &self.rec {
             if r.started.elapsed().as_secs_f32() >= r.max_s + 0.1 {
                 self.rec_stop();
@@ -1804,23 +2224,70 @@ impl eframe::App for StudioApp {
         }
         let compact = self.plat.mobile || ui.available_width() < 900.0;
 
-        egui::Panel::top("top").frame(Frame::new().fill(Color32::from_rgb(38, 43, 51)).inner_margin(Margin::symmetric(10, 6))).show(ui, |ui| self.top_bar(ui, compact));
-        egui::Panel::bottom("status").frame(Frame::new().fill(Color32::from_rgb(18, 20, 23)).inner_margin(Margin::symmetric(4, 3))).show(ui, |ui| self.status_bar(ui));
+        egui::Panel::top("top").frame(Frame::new().fill(Color32::from_rgb(30, 31, 35)).inner_margin(Margin::symmetric(10, 6))).show(ui, |ui| self.top_bar(ui, compact));
+        egui::Panel::bottom("status").frame(Frame::new().fill(Color32::from_rgb(14, 14, 17)).inner_margin(Margin::symmetric(4, 3))).show(ui, |ui| self.status_bar(ui));
+        let mut abierto = self.mic_panel;
+        egui::Panel::bottom("micro").frame(Frame::new().fill(PANEL).inner_margin(Margin::symmetric(14, 10)).stroke(Stroke::new(1.0, LINE))).show_collapsible(ui, &mut abierto, |ui| self.micro_panel(ui));
+        self.mic_panel = abierto && self.mic_panel;
+        let mut ver_letras = self.letras_panel;
+        egui::Panel::right("letras").default_size(300.0).frame(Frame::new().fill(PANEL).inner_margin(Margin::same(12)).stroke(Stroke::new(1.0, LINE))).show_collapsible(ui, &mut ver_letras, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Letras y notas").strong().size(14.0));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if icon_button(ui, Ic::Close, Vec2::new(26.0, 24.0), false, None).on_hover_text("Cerrar").clicked() {
+                        self.letras_panel = false;
+                    }
+                });
+            });
+            ui.add_space(6.0);
+            let antes = self.p.letras.len();
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                let r = ui.add_sized([ui.available_width(), (ui.available_height()).max(200.0)], egui::TextEdit::multiline(&mut self.p.letras).hint_text("Escribe aquí la letra, ideas o notas…").font(FontId::proportional(14.5)).frame(Frame::NONE));
+                if r.gained_focus() {
+                    // punto de deshacer antes de escribir: así deshacer otro cambio no borra la letra nueva
+                    self.snap();
+                }
+                if r.changed() || self.p.letras.len() != antes {
+                    self.cambios = true;
+                }
+            });
+        });
+        self.letras_panel = ver_letras && self.letras_panel;
         if compact {
-            egui::Panel::top("tabs").frame(Frame::new().fill(Color32::from_rgb(21, 24, 27)).inner_margin(Margin::symmetric(0, 4))).show(ui, |ui| self.view_tabs(ui, true));
+            egui::Panel::top("tabs").frame(Frame::new().fill(Color32::from_rgb(16, 17, 20)).inner_margin(Margin::symmetric(0, 4))).show(ui, |ui| self.view_tabs(ui, true));
             let v = self.view;
             egui::CentralPanel::default().frame(Frame::new().fill(PANEL)).show(ui, |ui| self.show_view(ui, v));
         } else {
             if self.show_playlist {
                 egui::Panel::top("playlist").resizable(true).default_size(ui.available_height() * 0.4).min_size(120.0).frame(Frame::new().fill(PANEL)).show(ui, |ui| self.playlist(ui));
             }
-            egui::Panel::top("docktabs").frame(Frame::new().fill(Color32::from_rgb(21, 24, 27)).inner_margin(Margin::symmetric(0, 4))).show(ui, |ui| self.view_tabs(ui, false));
+            egui::Panel::top("docktabs").frame(Frame::new().fill(Color32::from_rgb(16, 17, 20)).inner_margin(Margin::symmetric(0, 4))).show(ui, |ui| self.view_tabs(ui, false));
             let v = if self.view == View::Playlist { View::Rack } else { self.view };
             egui::CentralPanel::default().frame(Frame::new().fill(PANEL)).show(ui, |ui| self.show_view(ui, v));
         }
 
         self.plugin_windows(&ctx);
         self.playlist_menu(&ctx);
+        self.dialogo_guardar(&ctx);
+        self.dialogo_rescate(&ctx);
+        if ctx.input(|i| i.viewport().close_requested()) && !self.cerrar_ok && self.cambios && self.settings.preguntar && self.autotest.is_none() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.pendiente = Some(Pend::Cerrar);
+        }
+        let nombre = self.proj_path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().trim_end_matches(".json").trim_end_matches(".nns").to_string()).unwrap_or_else(|| self.p.name.clone());
+        let titulo = format!("{}{} - NoName Studio", nombre, if self.cambios { " *" } else { "" });
+        if titulo != self.titulo {
+            self.titulo = titulo.clone();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(titulo));
+        }
+        if (self.settings.zoom - self.zoom_puesto).abs() > 0.001 {
+            self.zoom_puesto = self.settings.zoom;
+            ctx.set_zoom_factor(self.settings.zoom.clamp(0.6, 2.0));
+        }
+        // primero se contesta si se recupera el trabajo; el tutorial espera
+        if !self.rescate {
+            self.tutorial(&ctx);
+        }
 
         // abrir proyecto (Android)
         if let Some(list) = self.open_list.clone() {
@@ -1856,6 +2323,16 @@ impl eframe::App for StudioApp {
         }
         self.plugins_store_state();
         self.save_settings();
+        // cierre normal: la copia de rescate ya no hace falta (si no se contestó la pregunta, se guarda para la próxima)
+        if !self.rescate {
+            self.borrar_rescate();
+        }
+        if !self.settings.abrir_ultimo {
+            if let Some(j) = &self.job {
+                j.cancel.store(true, Ordering::Relaxed);
+            }
+            return;
+        }
         if let Ok(s) = serde_json::to_string(&self.p) {
             let _ = std::fs::write(self.plat.data_dir.join("autosave.json"), s);
         }
@@ -1880,13 +2357,23 @@ enum Ic {
 /// Botón con icono vectorial (no depende de fuentes; se ve igual en Windows y Android).
 fn icon_button(ui: &mut Ui, ic: Ic, size: Vec2, selected: bool, fill: Option<Color32>) -> Response {
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-    let vis = ui.style().interact_selectable(&resp, selected);
-    let bg = fill.unwrap_or(if selected { ACCENT } else { vis.weak_bg_fill });
+    let t = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.12);
+    let base = fill.unwrap_or(if selected { ACCENT } else { PANEL2 });
+    let hover = if fill.is_some() || selected { base.gamma_multiply(1.15) } else { Color32::from_rgb(50, 55, 64) };
+    let bg = lerp_col(base, hover, t);
     let p = ui.painter();
-    p.rect(rect, 5, bg, vis.bg_stroke, StrokeKind::Inside);
-    let col = if selected || fill.is_some() { Color32::from_rgb(22, 22, 22) } else { vis.fg_stroke.color };
+    let r = rect.expand(t * 0.8);
+    p.rect_filled(r, (size.y * 0.5).min(9.0), bg);
+    let col = if selected || fill.is_some() { Color32::WHITE } else { lerp_col(Color32::from_rgb(214, 219, 226), Color32::WHITE, t) };
     draw_icon(p, ic, rect.center(), rect.height().min(rect.width()) * 0.3, col);
     resp
+}
+
+/// Mezcla de dos colores (t = 0 → a, t = 1 → b).
+fn lerp_col(a: Color32, b: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgba_unmultiplied(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()), m(a.a(), b.a()))
 }
 
 fn draw_icon(p: &egui::Painter, ic: Ic, c: Pos2, s: f32, col: Color32) {
@@ -1962,7 +2449,7 @@ fn knob(ui: &mut Ui, val: &mut f32, min: f32, max: f32, def: f32, label: &str, f
         let p = ui.painter();
         let c = rect.center();
         let r = 12.0;
-        p.circle_filled(c, r, Color32::from_rgb(22, 25, 29));
+        p.circle_filled(c, r, Color32::from_rgb(17, 18, 21));
         let a0 = std::f32::consts::PI * 0.75;
         let span = std::f32::consts::PI * 1.5;
         let frac = ((*val - min) / (max - min)).clamp(0.0, 1.0);
@@ -1974,7 +2461,7 @@ fn knob(ui: &mut Ui, val: &mut f32, min: f32, max: f32, def: f32, label: &str, f
             }).collect();
             p.add(egui::Shape::line(pts, Stroke::new(3.0, col)));
         };
-        arc(a0, a0 + span, Color32::from_rgb(52, 58, 66));
+        arc(a0, a0 + span, Color32::from_rgb(40, 41, 47));
         // los controles bipolares se pintan desde el centro
         let zero = if min < 0.0 && max > 0.0 { (0.0 - min) / (max - min) } else { 0.0 };
         let (fa, fb) = if frac >= zero { (zero, frac) } else { (frac, zero) };
@@ -1992,7 +2479,7 @@ fn knob(ui: &mut Ui, val: &mut f32, min: f32, max: f32, def: f32, label: &str, f
 fn meter(ui: &mut Ui, size: Vec2, peak: f32) {
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     let p = ui.painter();
-    p.rect_filled(rect, 3, Color32::from_rgb(11, 13, 15));
+    p.rect_filled(rect, 3, Color32::from_rgb(9, 9, 11));
     let db = if peak > 0.0 { 20.0 * peak.log10() } else { -99.0 };
     let f = ((db + 48.0) / 48.0).clamp(0.0, 1.0);
     if f > 0.0 {
@@ -2012,21 +2499,23 @@ fn meter(ui: &mut Ui, size: Vec2, peak: f32) {
 fn draw_pattern_preview(p: &egui::Painter, r: Rect, pat: &Pattern) {
     let steps = pat.len_steps() as f32;
     let sw = r.width() / steps;
-    let col = Color32::from_black_alpha(140);
+    let col = lerp_col(c32(pat.color), Color32::WHITE, 0.25);
     let all: Vec<&Note> = pat.notes.values().flatten().collect();
     if !all.is_empty() {
         let lo = all.iter().map(|n| n.m).min().unwrap() as f32;
         let hi = all.iter().map(|n| n.m).max().unwrap() as f32;
         let rg = (hi - lo).max(6.0);
         for n in all {
-            let y = r.bottom() - 2.0 - (n.m as f32 - lo) / rg * (r.height() - 4.0);
-            p.rect_filled(Rect::from_min_size(Pos2::new(r.left() + n.s as f32 * sw, y), Vec2::new((n.l as f32 * sw - 1.0).max(2.0), 2.0)), 0, col);
+            let y = r.bottom() - 3.0 - (n.m as f32 - lo) / rg * (r.height() - 6.0);
+            p.rect_filled(Rect::from_min_size(Pos2::new(r.left() + n.s as f32 * sw, y - 1.0), Vec2::new((n.l as f32 * sw - 1.0).max(2.0), 3.0)), 1, col);
         }
     } else {
+        let filas = pat.steps.len().max(1) as f32;
+        let alto = ((r.height() - 4.0) / filas).clamp(2.0, 6.0);
         for (row, a) in pat.steps.values().enumerate() {
             for (i, v) in a.iter().enumerate() {
                 if *v > 0.0 {
-                    p.rect_filled(Rect::from_min_size(Pos2::new(r.left() + i as f32 * sw, r.top() + 1.0 + (row % 5) as f32 * 3.6), Vec2::new((sw - 1.0).max(2.0), 3.0)), 0, col);
+                    p.rect_filled(Rect::from_min_size(Pos2::new(r.left() + i as f32 * sw, r.top() + 2.0 + row as f32 * (alto + 1.0)), Vec2::new((sw - 1.0).max(2.0), alto)), 1, col.gamma_multiply(0.5 + 0.5 * v));
                 }
             }
         }
@@ -2053,24 +2542,43 @@ fn setup_style(ctx: &egui::Context, mobile: bool) {
     let mut v = egui::Visuals::dark();
     v.panel_fill = BG;
     v.window_fill = PANEL;
-    v.extreme_bg_color = Color32::from_rgb(22, 25, 29);
-    v.selection.bg_fill = ACCENT.gamma_multiply(0.85);
-    v.selection.stroke = Stroke::new(1.0, Color32::from_rgb(27, 30, 34));
+    v.faint_bg_color = PANEL;
+    v.extreme_bg_color = Color32::from_rgb(14, 15, 18);
+    // lo elegido va en azul con letra blanca
+    v.selection.bg_fill = ACCENT;
+    v.selection.stroke = Stroke::new(1.0, Color32::WHITE);
+    v.hyperlink_color = ACCENT2;
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, LINE);
+    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(214, 219, 226));
     v.widgets.inactive.bg_fill = PANEL2;
     v.widgets.inactive.weak_bg_fill = PANEL2;
-    v.widgets.inactive.bg_stroke = Stroke::new(1.0, LINE);
-    v.widgets.hovered.weak_bg_fill = Color32::from_rgb(54, 60, 70);
-    v.widgets.hovered.bg_fill = Color32::from_rgb(54, 60, 70);
-    v.widgets.active.weak_bg_fill = ACCENT.gamma_multiply(0.7);
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, LINE);
-    for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
-        w.corner_radius = CornerRadius::same(5);
+    v.widgets.inactive.bg_stroke = Stroke::NONE;
+    v.widgets.inactive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(222, 226, 232));
+    v.widgets.hovered.weak_bg_fill = Color32::from_rgb(44, 48, 56);
+    v.widgets.hovered.bg_fill = Color32::from_rgb(44, 48, 56);
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(70, 76, 88));
+    v.widgets.hovered.fg_stroke = Stroke::new(1.0, Color32::WHITE);
+    v.widgets.hovered.expansion = 0.5;
+    v.widgets.active.weak_bg_fill = ACCENT.gamma_multiply(0.8);
+    v.widgets.active.bg_fill = ACCENT.gamma_multiply(0.8);
+    v.widgets.active.fg_stroke = Stroke::new(1.0, Color32::WHITE);
+    v.widgets.open.weak_bg_fill = Color32::from_rgb(44, 48, 56);
+    for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open, &mut v.widgets.noninteractive] {
+        w.corner_radius = CornerRadius::same(8);
     }
+    v.window_corner_radius = CornerRadius::same(12);
+    v.menu_corner_radius = CornerRadius::same(10);
+    v.window_stroke = Stroke::new(1.0, LINE);
+    v.window_shadow = egui::Shadow { offset: [0, 10], blur: 28, spread: 0, color: Color32::from_black_alpha(150) };
+    v.popup_shadow = egui::Shadow { offset: [0, 6], blur: 18, spread: 0, color: Color32::from_black_alpha(140) };
     v.slider_trailing_fill = true;
     ctx.set_visuals(v);
     ctx.global_style_mut(|s| {
-        s.spacing.item_spacing = Vec2::new(6.0, 4.0);
-        s.spacing.button_padding = Vec2::new(9.0, 4.0);
+        s.spacing.item_spacing = Vec2::new(7.0, 5.0);
+        s.spacing.button_padding = Vec2::new(11.0, 5.0);
+        s.spacing.slider_rail_height = 5.0;
+        // transiciones suaves (paneles, hover, menús)
+        s.animation_time = 0.16;
         if mobile {
             s.spacing.interact_size.y = 30.0;
         }

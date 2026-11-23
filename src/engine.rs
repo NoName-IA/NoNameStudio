@@ -15,6 +15,35 @@ pub const BLOCK: usize = 256;
 /// muestras de anticipación al programar pasos
 const LOOKAHEAD: f64 = 256.0;
 
+/// Lo que entra por el micrófono, para escucharse mientras se graba.
+pub struct Monitor {
+    pub cola: std::sync::Mutex<std::collections::VecDeque<f32>>,
+    pub sr: AtomicU32,
+    pub on: AtomicBool,
+    /// volumen (f32 en bits)
+    pub gain: AtomicU32,
+    /// autotune en vivo: encendido, velocidad de corrección (f32 en bits), tónica y escala de NN Tune
+    pub tune_on: AtomicBool,
+    pub tune_speed: AtomicU32,
+    pub tune_key: AtomicU32,
+    pub tune_scale: AtomicU32,
+    pub tune_mask: AtomicU32,
+    pub tune_estilo: AtomicU32,
+    /// seguir los acordes de la canción (si hay un acorde de 3 notas o más)
+    pub seguir: AtomicBool,
+    /// algoritmo de NN Tune y volumen de la armonía (f32 en bits)
+    pub tune_alg: AtomicU32,
+    pub tune_mezcla: AtomicU32,
+    /// paneo (-1…1) y reverberación (0…1) de la voz que te escuchas (f32 en bits)
+    pub pan: AtomicU32,
+    pub reverb: AtomicU32,
+    /// acorde que suena ahora (máscara de 12 bits)
+    pub acorde: AtomicU32,
+    /// nota cantada (f32 en bits; 0 = nada) y nota corregida (+1; 0 = ninguna)
+    pub cantada: AtomicU32,
+    pub objetivo: AtomicU32,
+}
+
 /// Estado compartido con la interfaz (solo atómicos, sin bloqueos).
 pub struct Status {
     pub playing: AtomicBool,
@@ -32,6 +61,7 @@ pub struct Status {
     pub load: AtomicU32,
     /// últimas muestras del master (mono) para el analizador de espectro
     pub scope: std::sync::Mutex<Vec<f32>>,
+    pub monitor: Monitor,
 }
 impl Default for Status {
     fn default() -> Self {
@@ -52,6 +82,26 @@ impl Status {
             tpeak: z(),
             load: z(),
             scope: std::sync::Mutex::new(vec![0.0; 2048]),
+            monitor: Monitor {
+                cola: std::sync::Mutex::new(std::collections::VecDeque::with_capacity(48_000)),
+                sr: AtomicU32::new(48_000),
+                on: AtomicBool::new(false),
+                gain: AtomicU32::new(0.8f32.to_bits()),
+                tune_on: AtomicBool::new(false),
+                tune_speed: AtomicU32::new(0.3f32.to_bits()),
+                tune_key: AtomicU32::new(0),
+                tune_scale: AtomicU32::new(0),
+                tune_mask: AtomicU32::new(0),
+                tune_estilo: AtomicU32::new(0),
+                seguir: AtomicBool::new(false),
+                tune_alg: AtomicU32::new(0),
+                tune_mezcla: AtomicU32::new(1.0f32.to_bits()),
+                pan: AtomicU32::new(0),
+                reverb: AtomicU32::new(0),
+                acorde: AtomicU32::new(0),
+                cantada: AtomicU32::new(0),
+                objetivo: AtomicU32::new(0),
+            },
         }
     }
     pub fn pos(&self) -> f64 {
@@ -134,6 +184,9 @@ struct Click {
 
 #[derive(Clone, Copy)]
 struct Trig {
+    /// ganancia y paneo de la pista de la playlist
+    tg: f32,
+    tp: f32,
     ci: usize,
     m: f32,
     v: f32,
@@ -177,6 +230,8 @@ pub struct Engine {
     samples: Samples,
     files: Files,
     vinyl: Vinyl,
+    /// nivel actual del vinilo (sube al reproducir y se apaga suave al detener)
+    vinyl_g: f32,
     metro: bool,
     clicks: Vec<Click>,
     preview_n: u32,
@@ -195,6 +250,18 @@ pub struct Engine {
     prev_voice: Option<Voice>,
     trigs: Vec<Trig>,
     auto_now: Vec<(AutoTarget, f32, u64)>,
+    mon_buf: Vec<f32>,
+    mon_last: f32,
+    mon_frac: f64,
+    /// cuadros que pide la tarjeta de sonido en cada llamada (el colchón de la escucha debe cubrirlos)
+    mon_cb: usize,
+    mon_listo: bool,
+    mon_tune: crate::fx::TuneLive,
+    mon_tune_on: bool,
+    /// nivelador de la voz (envolvente y ganancia) y reverberación de la escucha
+    mon_env: f32,
+    mon_agc: f32,
+    mon_verb: crate::fx::Verb,
 }
 
 impl Engine {
@@ -233,6 +300,7 @@ impl Engine {
             samples: HashMap::new(),
             files: HashMap::new(),
             vinyl: Vinyl::new(sr),
+            vinyl_g: 0.0,
             metro: false,
             clicks: Vec::with_capacity(16),
             preview_n: 0,
@@ -250,6 +318,16 @@ impl Engine {
             prev_voice: None,
             trigs: Vec::with_capacity(256),
             auto_now: Vec::with_capacity(64),
+            mon_buf: Vec::with_capacity(4096),
+            mon_last: 0.0,
+            mon_frac: 0.0,
+            mon_cb: BLOCK,
+            mon_listo: false,
+            mon_tune: crate::fx::TuneLive::new(sr),
+            mon_tune_on: false,
+            mon_env: 0.0,
+            mon_agc: 1.0,
+            mon_verb: crate::fx::Verb::new(sr),
         };
         e.sync_strips();
         e
@@ -345,6 +423,7 @@ impl Engine {
             }
             Cmd::Play { mode, from_step } => self.start(mode, from_step),
             Cmd::Stop => {
+                self.status.monitor.acorde.store(0, Ordering::Relaxed);
                 self.playing = false;
                 self.status.playing.store(false, Ordering::Relaxed);
                 self.voices.retain(|v| v.held || !matches!(v.kind, Inst::Rhodes | Inst::Pad | Inst::Bass));
@@ -413,7 +492,7 @@ impl Engine {
             return;
         }
         let before = self.voices.len();
-        self.dispatch(Trig { ci, m: m as f32, v, len, delay: 0, seed });
+        self.dispatch(Trig { tg: 1.0, tp: 0.0, ci, m: m as f32, v, len, delay: 0, seed });
         if held {
             for x in self.voices[before..].iter_mut() {
                 x.held = true;
@@ -492,13 +571,13 @@ impl Engine {
             }
         }
         let any_solo = self.proj.any_solo();
-        let mut events: [(usize, u32); 32] = [(0, 0); 32];
+        let mut events: [(usize, u32, f32, f32); 32] = [(0, 0, 1.0, 0.0); 32];
         let mut ne = 0;
         match self.mode {
             Mode::Pattern(id) => {
                 if let Some(pi) = self.proj.patterns.iter().position(|p| p.id == id) {
                     let len = self.proj.patterns[pi].len_steps() as u64;
-                    events[0] = (pi, (s % len) as u32);
+                    events[0] = (pi, (s % len) as u32, 1.0, 0.0);
                     ne = 1;
                 }
             }
@@ -508,16 +587,25 @@ impl Engine {
                         let s0 = cl.bar as u64 * STEPS_PER_BAR as u64;
                         let len = self.proj.patterns[pi].len_steps() as u64;
                         if s >= s0 && s < s0 + len && ne < events.len() {
-                            events[ne] = (pi, (s - s0) as u32);
-                            ne += 1;
+                            if let Some((g, pn)) = self.proj.pista_suena(cl.track as usize) {
+                                events[ne] = (pi, (s - s0) as u32, g, pn);
+                                ne += 1;
+                            }
                         }
                     }
                 }
             }
         }
+        let pat_id = match self.mode {
+            Mode::Pattern(id) => Some(id),
+            Mode::Song => None,
+        };
+        let acorde = self.proj.acorde_en(pat_id, s);
+        self.status.monitor.acorde.store(acorde as u32, Ordering::Relaxed);
         let mut trigs = std::mem::take(&mut self.trigs);
         trigs.clear();
-        for &(pi, l) in &events[..ne] {
+        for &(pi, l, tg, tp) in &events[..ne] {
+            let t0 = trigs.len();
             let sw = self.swing(l, sps);
             let pat = &self.proj.patterns[pi];
             for (ci, c) in self.proj.channels.iter().enumerate() {
@@ -546,7 +634,7 @@ impl Engine {
                             let d = (base_delay + sw + human).max(0.0) as u32;
                             let v = if c.inst.is_drum() { vel * (0.92 + r * 0.16) } else { vel };
                             let m = if c.inst == Inst::Sampler { c.smp.root as f32 } else { 60.0 };
-                            trigs.push(Trig { ci, m, v, len: sps as f32 / sr, delay: d, seed });
+                            trigs.push(Trig { tg: 1.0, tp: 0.0, ci, m, v, len: sps as f32 / sr, delay: d, seed });
                         }
                     }
                 }
@@ -585,7 +673,7 @@ impl Engine {
                     if c.arp.mode == 4 {
                         for i in 0..kk {
                             let (m, v) = note_at(i);
-                            trigs.push(Trig { ci, m, v, len: glen, delay: d + (i as f64 * c.strum as f64 * sr as f64) as u32, seed: hash(seed, i as u32) });
+                            trigs.push(Trig { tg: 1.0, tp: 0.0, ci, m, v, len: glen, delay: d + (i as f64 * c.strum as f64 * sr as f64) as u32, seed: hash(seed, i as u32) });
                         }
                     } else {
                         let i = match c.arp.mode {
@@ -599,7 +687,7 @@ impl Engine {
                             _ => idx % n,
                         };
                         let (m, v) = note_at(i);
-                        trigs.push(Trig { ci, m, v, len: glen, delay: d, seed });
+                        trigs.push(Trig { tg: 1.0, tp: 0.0, ci, m, v, len: glen, delay: d, seed });
                     }
                     continue;
                 }
@@ -615,12 +703,23 @@ impl Engine {
                 for (i, &(m, len, v, o)) in on[..kk].iter().enumerate() {
                     let d = (base_delay + sw + o.clamp(0.0, 0.99) as f64 * sps + i as f64 * c.strum as f64 * sr as f64).max(0.0) as u32;
                     let len_s = len as f32 * sps as f32 / sr;
-                    trigs.push(Trig { ci, m: m as f32, v, len: len_s, delay: d, seed: hash(seed, i as u32) });
+                    trigs.push(Trig { tg: 1.0, tp: 0.0, ci, m: m as f32, v, len: len_s, delay: d, seed: hash(seed, i as u32) });
                 }
+            }
+            // volumen y paneo de la pista de la playlist
+            for t in &mut trigs[t0..] {
+                t.v *= tg;
+                t.tp = tp;
             }
         }
         for t in trigs.iter() {
+            let n0 = self.voices.len();
             self.dispatch(*t);
+            if t.tp != 0.0 {
+                for v in &mut self.voices[n0..] {
+                    v.pan = t.tp;
+                }
+            }
         }
         self.trigs = trigs;
         // clips de audio de la playlist
@@ -638,7 +737,9 @@ impl Engine {
                 if c.mute || (any_solo && !c.solo) {
                     continue;
                 }
-                if let Some(v) = self.clip_voice(ci, i, (s - cs) as f64, base_delay as u32) {
+                let Some((tg, tp)) = self.proj.pista_suena(cl.track as usize) else { continue };
+                if let Some(mut v) = self.clip_voice(ci, i, (s - cs) as f64, base_delay as u32, tg) {
+                    v.pan = tp;
                     self.voices.push(v);
                 }
             }
@@ -722,7 +823,7 @@ impl Engine {
     }
 
     /// Voz de un clip de audio empezando `off_steps` pasos dentro del clip.
-    fn clip_voice(&self, ci: usize, idx: usize, off_steps: f64, delay: u32) -> Option<Voice> {
+    fn clip_voice(&self, ci: usize, idx: usize, off_steps: f64, delay: u32, vol: f32) -> Option<Voice> {
         let cl = &self.proj.audio_clips[idx];
         let file = cl.file();
         let ratio = cl.ratio(self.proj.bpm);
@@ -742,7 +843,117 @@ impl Engine {
         }
         let rest = dur - clip_t;
         let st = SmpState { rate: buf.sr as f64 / self.sr as f64, buf, pos, lo: 0.0, hi: n, gain: cl.gain, att: 0.0, rel: 0.004, fade_in: cl.fade_in, fade_out: cl.fade_out, t0: clip_t, dur };
-        Some(Voice::file(ci, Inst::Audio, delay, 1.0, st, rest, rest, self.sr))
+        Some(Voice::file(ci, Inst::Audio, delay, vol, st, rest, rest, self.sr))
+    }
+
+    /// Suma la voz del micrófono a la salida. Mantiene un pequeño colchón de audio y ajusta la
+    /// velocidad de lectura (±0,5 %) para que los relojes del micrófono y la salida no se separen.
+    fn mix_monitor(&mut self, out: &mut [f32]) {
+        let m = &self.status.monitor;
+        if self.offline || !m.on.load(Ordering::Relaxed) {
+            self.mon_frac = 0.0;
+            self.mon_listo = false;
+            return;
+        }
+        let frames = out.len() / 2;
+        let sr_in = m.sr.load(Ordering::Relaxed).max(1) as f64;
+        // 15 ms de colchón más lo que se lleva de una vez cada llamada de la tarjeta (con bloques
+        // grandes, 1024 o 2048, se consumen varios bloques seguidos y un colchón fijo se vacía)
+        let objetivo = sr_in * 0.015 + self.mon_cb.saturating_sub(BLOCK) as f64 * sr_in / self.sr as f64;
+        let gain = f32::from_bits(m.gain.load(Ordering::Relaxed));
+        let Ok(mut q) = m.cola.try_lock() else { return };
+        let hay = q.len() as f64;
+        if !self.mon_listo {
+            if hay < objetivo {
+                return;
+            }
+            self.mon_listo = true;
+        }
+        // demasiado atraso acumulado: se recorta hasta el colchón
+        while q.len() as f64 > objetivo * 4.0 {
+            q.pop_front();
+        }
+        let hay = q.len() as f64;
+        let ajuste = ((hay - objetivo) / objetivo).clamp(-1.0, 1.0) * 0.005;
+        let ratio = sr_in / self.sr as f64 * (1.0 + ajuste);
+        let fin = self.mon_frac + frames as f64 * ratio;
+        let take = fin.floor() as usize;
+        if q.len() < take {
+            // se quedó sin audio: se apaga suave y se vuelve a llenar el colchón
+            let last = self.mon_last;
+            for f in 0..frames {
+                let v = last * (1.0 - (f + 1) as f32 / frames as f32) * gain;
+                out[f * 2] += v;
+                out[f * 2 + 1] += v;
+            }
+            self.mon_last = 0.0;
+            self.mon_frac = 0.0;
+            self.mon_listo = false;
+            return;
+        }
+        self.mon_buf.clear();
+        self.mon_buf.push(self.mon_last);
+        self.mon_buf.extend(q.drain(..take));
+        drop(q);
+        let tune_on = m.tune_on.load(Ordering::Relaxed);
+        let acorde = m.acorde.load(Ordering::Relaxed) as u16;
+        let mascara = if m.seguir.load(Ordering::Relaxed) && acorde.count_ones() >= 3 { acorde as u32 } else { m.tune_mask.load(Ordering::Relaxed) };
+        if tune_on && !self.mon_tune_on {
+            self.mon_tune.reset();
+        }
+        self.mon_tune_on = tune_on;
+        let tp = TuneP {
+            on: true,
+            key: m.tune_key.load(Ordering::Relaxed) as u8,
+            scale: m.tune_scale.load(Ordering::Relaxed) as u8,
+            speed: f32::from_bits(m.tune_speed.load(Ordering::Relaxed)),
+            mix: 1.0,
+            gain: 1.0,
+            mask: mascara as u16,
+            estilo: m.tune_estilo.load(Ordering::Relaxed) as u8,
+            algoritmo: m.tune_alg.load(Ordering::Relaxed) as u8,
+            mezcla: f32::from_bits(m.tune_mezcla.load(Ordering::Relaxed)),
+        };
+        let sr = self.sr;
+        let at_env = 1.0 - (-1.0 / (0.004 * sr)).exp();
+        let rel_env = 1.0 - (-1.0 / (0.25 * sr)).exp();
+        let at_agc = 1.0 - (-1.0 / (0.01 * sr)).exp();
+        let rel_agc = 1.0 - (-1.0 / (0.4 * sr)).exp();
+        let pan = f32::from_bits(m.pan.load(Ordering::Relaxed)).clamp(-1.0, 1.0);
+        let ang = (pan + 1.0) * std::f32::consts::FRAC_PI_4;
+        let (pl, pr) = (ang.cos() * std::f32::consts::SQRT_2, ang.sin() * std::f32::consts::SQRT_2);
+        let verb_ret = f32::from_bits(m.reverb.load(Ordering::Relaxed)).clamp(0.0, 1.0);
+        let vp = crate::project::VerbP { size: 0.55, decay: 0.5, damp: 0.35, predelay_ms: 25.0, width: 1.0, lowcut: 250.0, ret: verb_ret * 0.9 };
+        for f in 0..frames {
+            let p = self.mon_frac + f as f64 * ratio;
+            let i = p as usize;
+            let fr = (p - i as f64) as f32;
+            let a = self.mon_buf[i.min(take)];
+            let b = self.mon_buf[(i + 1).min(take)];
+            let mut v = a + (b - a) * fr;
+            if tune_on {
+                v = self.mon_tune.process(v, &tp);
+            } else {
+                self.mon_tune.escuchar(v, &tp);
+            }
+            // nivelador: sube la voz a un nivel fuerte y parejo (no sube el ruido de cuando no cantas)
+            let a = v.abs();
+            self.mon_env += (a - self.mon_env) * if a > self.mon_env { at_env } else { rel_env };
+            let deseo = if self.mon_env > 0.004 { (0.42 / self.mon_env).clamp(1.0, 8.0) } else { 1.0 };
+            self.mon_agc += (deseo - self.mon_agc) * if deseo < self.mon_agc { at_agc } else { rel_agc };
+            let v = v * self.mon_agc * gain;
+            let (rl, rr) = if verb_ret > 0.001 { self.mon_verb.run(v, &vp) } else { (0.0, 0.0) };
+            let lim = |x: f32| {
+                let a = x.abs();
+                if a < 0.8 { x } else { x.signum() * (0.8 + 0.2 * ((a - 0.8) / 0.2).tanh()) }
+            };
+            out[f * 2] += lim(v * pl + rl);
+            out[f * 2 + 1] += lim(v * pr + rr);
+        }
+        self.mon_last = self.mon_buf[take];
+        self.mon_frac = fin - take as f64;
+        m.cantada.store(self.mon_tune.cantada.to_bits(), Ordering::Relaxed);
+        m.objetivo.store((self.mon_tune.objetivo + 1).max(0) as u32, Ordering::Relaxed);
     }
 
     /// Valores de automatización en la posición actual (solo en modo canción).
@@ -794,6 +1005,7 @@ impl Engine {
     pub fn render(&mut self, out: &mut [f32]) {
         let t0 = if self.offline { None } else { Some(std::time::Instant::now()) };
         let total = out.len() / 2;
+        self.mon_cb = total.max(BLOCK);
         let mut done = 0;
         while done < total {
             let n = (total - done).min(BLOCK);
@@ -881,13 +1093,15 @@ impl Engine {
                 continue;
             }
             let (l, r) = (&mut self.chl[v.ch], &mut self.chr[v.ch]);
+            // paneo de la pista (balance: al centro no cambia nada)
+            let (gl, gr) = ((1.0 - v.pan).min(1.0), (1.0 + v.pan).min(1.0));
             for f in 0..frames {
                 if v.done {
                     break;
                 }
                 let (a, b) = v.next2(sr);
-                l[f] += a;
-                r[f] += b;
+                l[f] += a * gl;
+                r[f] += b * gr;
             }
         }
         self.voices.retain(|v| !v.done);
@@ -1001,7 +1215,12 @@ impl Engine {
         let (verb_p, space_p, mcomp_p, lim_p) = (self.proj.verb, self.proj.space, self.proj.master_comp, self.proj.limiter);
         self.meq.set(&self.proj.master_eq, sr);
         let dly_samples = (sps * 3.0) as usize;
-        let vinyl_amt = if self.bypass_master { 0.0 } else { self.proj.vinyl * 0.6 };
+        // el vinilo es parte de la canción: solo suena mientras se reproduce
+        let vinyl_to = if self.bypass_master || !self.playing { 0.0 } else { self.proj.vinyl * 0.6 };
+        let vinyl_from = self.vinyl_g;
+        let vinyl_step = (vinyl_to - vinyl_from) / frames as f32;
+        self.vinyl_g = if (vinyl_to - vinyl_from).abs() < 1e-4 { vinyl_to } else { vinyl_from + (vinyl_to - vinyl_from) * 0.25 };
+        let vinyl_on = vinyl_from > 0.0 || vinyl_to > 0.0;
         let mtarget = self.auto(AutoTarget::Master).unwrap_or(self.proj.master);
         let mprev = if self.prev_master < 0.0 { mtarget } else { self.prev_master };
         let inv = 1.0 / frames as f32;
@@ -1010,7 +1229,7 @@ impl Engine {
             let (rl, rr) = self.verb.run(self.brev[f], &verb_p);
             let (dl, dr) = self.delay.run(self.bdly[f] * 0.8, self.bdly[f] * 0.8, dly_samples);
             let (sl, sr2) = if any_space { self.space.run(self.bspc[f], &space_p) } else { (0.0, 0.0) };
-            let vn = if vinyl_amt > 0.0 { self.vinyl.run() * vinyl_amt } else { 0.0 };
+            let vn = if vinyl_on { self.vinyl.run() * (vinyl_from + vinyl_step * 0.25 * (f + 1) as f32) } else { 0.0 };
             let mut l = self.mixl[f] + rl + dl + sl + vn;
             let mut r = self.mixr[f] + rr + dr + sr2 + vn;
             if !bypass {
@@ -1066,6 +1285,7 @@ impl Engine {
             out[f * 2 + 1] = or;
         }
         self.clicks.retain(|c| c.t < 0.08);
+        self.mix_monitor(out);
         if self.prev_voice.as_ref().is_some_and(|v| v.done) {
             self.prev_voice = None;
         }

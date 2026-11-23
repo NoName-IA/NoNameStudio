@@ -15,16 +15,36 @@ pub struct AudioOut {
     pub device: String,
 }
 
-pub fn start(proj: Project, status: Arc<Status>) -> Result<AudioOut, String> {
+fn nombre(d: &cpal::Device) -> String {
+    d.description().map(|x| x.name().to_string()).unwrap_or_default()
+}
+
+/// Nombres de las salidas de audio (parlantes, audífonos…).
+pub fn outputs() -> Vec<String> {
     let host = cpal::default_host();
-    let dev = host.default_output_device().ok_or("No hay dispositivo de salida de audio")?;
+    host.output_devices().map(|it| it.map(|d| nombre(&d)).filter(|n| !n.is_empty()).collect()).unwrap_or_default()
+}
+/// Nombres de las entradas de audio (micrófonos).
+pub fn inputs() -> Vec<String> {
+    let host = cpal::default_host();
+    host.input_devices().map(|it| it.map(|d| nombre(&d)).filter(|n| !n.is_empty()).collect()).unwrap_or_default()
+}
+
+/// `salida` = nombre del dispositivo ("" = el predeterminado); `buffer` = cuadros por bloque (0 = automático).
+pub fn start(proj: Project, status: Arc<Status>, salida: &str, buffer: u32) -> Result<AudioOut, String> {
+    let host = cpal::default_host();
+    let elegido = if salida.is_empty() { None } else { host.output_devices().ok().and_then(|mut it| it.find(|d| nombre(d) == salida)) };
+    let dev = match elegido {
+        Some(d) => d,
+        None => host.default_output_device().ok_or("No hay dispositivo de salida de audio")?,
+    };
     let device = dev.description().map(|d| d.name().to_string()).unwrap_or_else(|_| "Salida de audio".into());
     let def = dev.default_output_config().map_err(|e| e.to_string())?;
     let fmt = def.sample_format();
     let mut cfg: cpal::StreamConfig = def.config();
     let sr = cfg.sample_rate;
     let chans = cfg.channels as usize;
-    cfg.buffer_size = cpal::BufferSize::Default;
+    cfg.buffer_size = if buffer > 0 { cpal::BufferSize::Fixed(buffer) } else { cpal::BufferSize::Default };
 
     let (tx, rx) = channel::<Cmd>();
     struct Filler {
@@ -94,42 +114,67 @@ pub struct Recorder {
     pub sr: u32,
 }
 
-pub fn record(status: Arc<Status>) -> Result<Recorder, String> {
+/// `guardar` = false: solo para escucharse (no acumula lo que entra).
+/// `canal`: 0 = mezcla de todos los canales de la entrada; 1, 2… = solo ese canal.
+pub fn record(status: Arc<Status>, entrada: &str, guardar: bool, canal: usize) -> Result<Recorder, String> {
     #[cfg(target_os = "android")]
     if !request_mic() {
         return Err("Concede el permiso de micrófono y vuelve a pulsar Grabar.".into());
     }
     let host = cpal::default_host();
-    let dev = host.default_input_device().ok_or("No hay micrófono disponible")?;
+    let elegido = if entrada.is_empty() { None } else { host.input_devices().ok().and_then(|mut it| it.find(|d| nombre(d) == entrada)) };
+    let dev = match elegido {
+        Some(d) => d,
+        None => host.default_input_device().ok_or("No hay micrófono disponible")?,
+    };
     let def = dev.default_input_config().map_err(|e| e.to_string())?;
     let fmt = def.sample_format();
     let cfg: cpal::StreamConfig = def.config();
     let sr = cfg.sample_rate;
     let chans = cfg.channels as usize;
     let buf = Arc::new(Mutex::new(Vec::<f32>::with_capacity(sr as usize * 30)));
+    status.monitor.sr.store(sr, Ordering::Relaxed);
+    if let Ok(mut q) = status.monitor.cola.lock() {
+        q.clear();
+    }
     let err = |e| eprintln!("micrófono: {e}");
     let push = {
         let buf = buf.clone();
         move |frames: &mut dyn Iterator<Item = f32>| {
             let mut pk = 0f32;
+            let mut nuevos = 0usize;
             if let Ok(mut b) = buf.lock() {
+                if !guardar {
+                    b.clear();
+                }
                 for v in frames {
                     pk = pk.max(v.abs());
                     b.push(v);
+                    nuevos += 1;
                 }
             }
             let prev = f32::from_bits(status.input.load(Ordering::Relaxed));
             status.input.store(prev.max(pk).to_bits(), Ordering::Relaxed);
+            if status.monitor.on.load(Ordering::Relaxed) {
+                if let (Ok(b), Ok(mut q)) = (buf.lock(), status.monitor.cola.lock()) {
+                    let n = b.len().saturating_sub(nuevos);
+                    q.extend(b[n..].iter().copied());
+                    let max = 48_000usize;
+                    while q.len() > max {
+                        q.pop_front();
+                    }
+                }
+            }
         }
     };
     let stream = match fmt {
         cpal::SampleFormat::F32 => {
             let mut push = push;
-            dev.build_input_stream(cfg, move |d: &[f32], _| push(&mut d.chunks(chans).map(|f| f.iter().sum::<f32>() / chans as f32)), err, None)
+            dev.build_input_stream(cfg, move |d: &[f32], _| push(&mut d.chunks(chans).map(|f| if canal >= 1 && canal <= f.len() { f[canal - 1] } else { f.iter().sum::<f32>() / chans as f32 })), err, None)
         }
         cpal::SampleFormat::I16 => {
             let mut push = push;
-            dev.build_input_stream(cfg, move |d: &[i16], _| push(&mut d.chunks(chans).map(|f| f.iter().map(|&x| x as f32 / 32768.0).sum::<f32>() / chans as f32)), err, None)
+            dev.build_input_stream(cfg, move |d: &[i16], _| push(&mut d.chunks(chans).map(|f| if canal >= 1 && canal <= f.len() { f[canal - 1] as f32 / 32768.0 } else { f.iter().map(|&x| x as f32 / 32768.0).sum::<f32>() / chans as f32 })), err, None)
         }
         other => return Err(format!("Formato de micrófono no soportado: {other:?}")),
     }

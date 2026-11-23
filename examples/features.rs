@@ -243,7 +243,7 @@ fn main() {
     // 11. stems
     let (pr, ca) = (AtomicU32::new(0), AtomicBool::new(false));
     let out = dir.join("stems");
-    let d = noname_studio::export::export_full(&Project::demo(), &Bank::default(), &out, noname_studio::export::Format::Stems, &pr, &ca, &mut |_| {}).unwrap();
+    let d = noname_studio::export::export_full(&Project::demo(), &Bank::default(), &out, noname_studio::export::Format::Stems, &Default::default(), &pr, &ca, &mut |_| {}).unwrap();
     all &= ok(d.files == Project::demo().channels.len(), "Exportar stems", format!("{} archivos en {}", d.files, d.path.display()));
 
     // 12. plantillas
@@ -269,6 +269,280 @@ fn main() {
     let on = media::onsets(&Buf { ch: 1, sr: SR, data: d }, 0.5, 16);
     all &= ok(on.len() == 4, "Detección de golpes (slicer)", format!("{:?}", on.iter().map(|x| (x * 100.0).round() / 100.0).collect::<Vec<_>>()));
     all &= ok((media::guess_bpm("loop 92bpm", 2.6) - 92.0).abs() < 0.1 && (media::guess_bpm("x", 2.0) - 120.0).abs() < 0.1, "Adivinar tempo de un loop", format!("{} / {}", media::guess_bpm("loop 92bpm", 2.6), media::guess_bpm("x", 2.0)));
+
+    // 14. el vinilo no suena con la reproducción detenida
+    let mut e = Engine::new(SR, Project::demo(), Arc::new(Status::new()));
+    let mut b = vec![0f32; 2048];
+    let mut pk = 0f32;
+    for _ in 0..40 {
+        e.render(&mut b);
+        pk = b.iter().fold(pk, |m, x| m.max(x.abs()));
+    }
+    let mut q = Project::demo();
+    q.playlist.clear();
+    for c in q.channels.iter_mut() {
+        c.mute = true;
+    }
+    let mut e2 = Engine::new(SR, q, Arc::new(Status::new()));
+    e2.start(Mode::Pattern(0), 0);
+    let mut pk2 = 0f32;
+    for _ in 0..40 {
+        e2.render(&mut b);
+        pk2 = b.iter().fold(pk2, |m, x| m.max(x.abs()));
+    }
+    all &= ok(pk == 0.0 && pk2 > 0.0005, "Vinilo solo al reproducir", format!("detenido: pico {pk:.5} · reproduciendo: pico {pk2:.4}"));
+
+    // 15. escucharse: tono de 440 Hz entrando a 44.1 kHz, salida a 48 kHz
+    let st = Arc::new(Status::new());
+    st.monitor.sr.store(44_100, std::sync::atomic::Ordering::Relaxed);
+    st.monitor.on.store(true, std::sync::atomic::Ordering::Relaxed);
+    st.monitor.gain.store(1.0f32.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    let mut q = Project::empty("m", 120.0);
+    q.channels.push(Channel::new(1, Inst::Kick));
+    let mut e = Engine::new(48_000.0, q, st.clone());
+    let mut out = vec![];
+    let mut fase = 0usize;
+    let mut b = vec![0f32; 1024];
+    for _ in 0..200 {
+        // el micrófono entrega ~470 muestras por cada bloque de 512 cuadros de salida
+        if let Ok(mut c) = st.monitor.cola.lock() {
+            for _ in 0..470 {
+                c.push_back((fase as f32 / 44_100.0 * 440.0 * std::f32::consts::TAU).sin() * 0.5);
+                fase += 1;
+            }
+        }
+        e.render(&mut b);
+        out.extend_from_slice(&b);
+    }
+    let tramo = &out[out.len() / 2..];
+    let l: Vec<f32> = tramo.chunks(2).map(|f| f[0]).collect();
+    let z = l.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count() as f32 / (l.len() as f32 / 48_000.0);
+    let pk = l.iter().fold(0f32, |m, x| m.max(x.abs()));
+    let saltos = l.windows(2).filter(|w| (w[1] - w[0]).abs() > 0.2).count();
+    all &= ok((z - 440.0).abs() < 8.0 && pk > 0.4 && saltos == 0, "Escucharse al grabar (44.1 → 48 kHz)", format!("{z:.0} Hz, pico {pk:.2}, saltos {saltos}"));
+
+    // 16. autotune en vivo: un La desafinado (450 Hz) sale como La (440 Hz)
+    st.monitor.tune_on.store(true, std::sync::atomic::Ordering::Relaxed);
+    st.monitor.tune_speed.store(0.0f32.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    st.monitor.tune_key.store(9, std::sync::atomic::Ordering::Relaxed);
+    st.monitor.tune_scale.store(0, std::sync::atomic::Ordering::Relaxed);
+    let mut out = vec![];
+    let mut fase = 0usize;
+    for _ in 0..300 {
+        if let Ok(mut c) = st.monitor.cola.lock() {
+            for _ in 0..470 {
+                c.push_back((fase as f32 / 44_100.0 * 450.0 * std::f32::consts::TAU).sin() * 0.5);
+                fase += 1;
+            }
+        }
+        e.render(&mut b);
+        out.extend_from_slice(&b);
+    }
+    let l: Vec<f32> = out[out.len() / 2..].chunks(2).map(|f| f[0]).collect();
+    let z = l.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count() as f32 / (l.len() as f32 / 48_000.0);
+    all &= ok((z - 440.0).abs() < 4.0, "Autotune en vivo (450 Hz → La 440)", format!("{z:.1} Hz"));
+    let t0 = std::time::Instant::now();
+    let mut tl = noname_studio::fx::TuneLive::new(48_000.0);
+    let tp = TuneP { on: true, key: 9, scale: 0, speed: 0.0, mix: 1.0, gain: 1.0, mask: 0, estilo: 0, algoritmo: 0, mezcla: 1.0 };
+    let mut acc = 0f32;
+    for i in 0..48_000 {
+        acc += tl.process((i as f32 / 48_000.0 * 450.0 * std::f32::consts::TAU).sin() * 0.5, &tp);
+    }
+    let ms = t0.elapsed().as_secs_f32() * 1000.0;
+    all &= ok(ms < 150.0 && acc.is_finite(), "Autotune en vivo: costo", format!("{ms:.0} ms por cada segundo de voz"));
+
+    // 17. estilos: «Ardilla» sube una octava y «Dúo» agrega la octava grave
+    let x: Vec<f32> = (0..44_100).map(|i| (i as f32 / 44_100.0 * 220.0 * std::f32::consts::TAU).sin() * 0.5).collect();
+    let base = TuneP { on: true, key: 9, scale: 0, speed: 0.0, mix: 1.0, gain: 1.0, mask: scale_mask(9, 1), estilo: 5, algoritmo: 0, mezcla: 1.0 };
+    let ard = noname_studio::fx::autotune(&x, 44_100.0, &base);
+    let fz = |v: &[f32]| v.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count() as f32 / (v.len() as f32 / 44_100.0);
+    let mut fs: Vec<f32> = (0..12).filter_map(|k| noname_studio::fx::yin(&ard.out[12_000 + k * 2_000..14_048 + k * 2_000], 44_100.0)).collect();
+    fs.sort_by(|a, b| a.total_cmp(b));
+    println!("      ardilla, tonos medidos: {:?}", fs.iter().map(|f| f.round()).collect::<Vec<_>>());
+    let f_ard = fs.get(fs.len() / 2).copied().unwrap_or(0.0);
+    let _ = fz;
+    // voz de prueba con armónicos (como una voz real): el dúo debe sumar la octava grave (110 Hz)
+    let voz: Vec<f32> = (0..44_100).map(|i| (1..8).map(|h| (i as f32 / 44_100.0 * 220.0 * h as f32 * std::f32::consts::TAU).sin() * 0.35 / h as f32).sum()).collect();
+    let duo = noname_studio::fx::autotune(&voz, 44_100.0, &TuneP { estilo: 3, ..base });
+    let mut fd: Vec<f32> = (0..10).filter_map(|k| noname_studio::fx::yin(&duo.out[12_000 + k * 2_000..14_048 + k * 2_000], 44_100.0)).collect();
+    fd.sort_by(|a, b| a.total_cmp(b));
+    let f_duo = fd.get(fd.len() / 2).copied().unwrap_or(0.0);
+    println!("      dúo, tonos medidos: {:?}", fd.iter().map(|f| f.round()).collect::<Vec<_>>());
+    let sube = if (f_duo - 110.0).abs() < 4.0 { 2.0 } else { 0.0 };
+    all &= ok((f_ard - 440.0).abs() < 4.0 && sube > 1.5, "Estilos de NN Tune (ardilla y dúo)", format!("ardilla {f_ard:.0} Hz · dúo: tono de base {f_duo:.0} Hz (esperado 110)"));
+
+    // 18. seguir los acordes: se canta un La (450 Hz) sobre Do mayor → la voz va a Sol (392 Hz)
+    st.monitor.seguir.store(true, std::sync::atomic::Ordering::Relaxed);
+    st.monitor.acorde.store((1 << 0) | (1 << 4) | (1 << 7), std::sync::atomic::Ordering::Relaxed);
+    let mut out = vec![];
+    for _ in 0..300 {
+        if let Ok(mut c) = st.monitor.cola.lock() {
+            for _ in 0..470 {
+                c.push_back((fase as f32 / 44_100.0 * 450.0 * std::f32::consts::TAU).sin() * 0.5);
+                fase += 1;
+            }
+        }
+        e.render(&mut b);
+        out.extend_from_slice(&b);
+    }
+    let l: Vec<f32> = out[out.len() / 2..].chunks(2).map(|f| f[0]).collect();
+    let mut fs: Vec<f32> = (0..8).filter_map(|k| noname_studio::fx::yin(&l[k * 4_000..k * 4_000 + 2_048], 48_000.0)).collect();
+    fs.sort_by(|a, b| a.total_cmp(b));
+    let fa = fs.get(fs.len() / 2).copied().unwrap_or(0.0);
+    let cant = f32::from_bits(st.monitor.cantada.load(std::sync::atomic::Ordering::Relaxed));
+    all &= ok((fa - 392.0).abs() < 5.0 && (cant - 69.3).abs() < 0.3, "Seguir los acordes (La sobre Do mayor → Sol)", format!("sale {fa:.0} Hz; la pantalla muestra nota cantada {cant:.2}"));
+
+    // 19. algoritmo de baja demora y gran armonía (tres voces)
+    let x450: Vec<f32> = (0..44_100).map(|i| (i as f32 / 44_100.0 * 450.0 * std::f32::consts::TAU).sin() * 0.5).collect();
+    let bd = noname_studio::fx::autotune(&x450, 44_100.0, &TuneP { estilo: 0, algoritmo: 1, mask: scale_mask(9, 1), ..base });
+    let mut fb: Vec<f32> = (0..8).filter_map(|k| noname_studio::fx::yin(&bd.out[12_000 + k * 3_000..14_048 + k * 3_000], 44_100.0)).collect();
+    fb.sort_by(|a, b| a.total_cmp(b));
+    let f_bd = fb.get(fb.len() / 2).copied().unwrap_or(0.0);
+    let ga = noname_studio::fx::autotune(&voz, 44_100.0, &TuneP { estilo: 6, ..base });
+    // en La menor: la tercera (Do, 261.6 Hz) y la quinta (Mi, 330 Hz) sobre La 220
+    let energia = |v: &[f32], f: f32| {
+        let (mut c, mut s) = (0f32, 0f32);
+        for (i, x) in v.iter().enumerate() {
+            let a = i as f32 / 44_100.0 * f * std::f32::consts::TAU;
+            c += x * a.cos();
+            s += x * a.sin();
+        }
+        (c * c + s * s).sqrt() / v.len() as f32
+    };
+    let (t3, t5) = (energia(&ga.out[10_000..40_000], 261.6) / energia(&voz[10_000..40_000], 261.6).max(1e-6), energia(&ga.out[10_000..40_000], 329.6) / energia(&voz[10_000..40_000], 329.6).max(1e-6));
+    all &= ok((f_bd - 440.0).abs() < 4.0 && t3 > 5.0 && t5 > 5.0, "Baja demora y gran armonía", format!("baja demora {f_bd:.0} Hz · tercera ×{t3:.0} · quinta ×{t5:.0}"));
+
+    // 20. precisión: una voz desafinada (+25 ¢) con vibrato de ±40 ¢ sale clavada en La 440,
+    // con todos los estilos sin armonía e intensidad media, en los dos algoritmos
+    let sr = 48_000.0f32;
+    let mut fase = 0f32;
+    let voz: Vec<f32> = (0..(sr as usize * 2))
+        .map(|i| {
+            let t = i as f32 / sr;
+            let f = 440.0 * 2f32.powf((25.0 + 40.0 * (t * 5.5 * std::f32::consts::TAU).sin()) / 1200.0);
+            fase += f / sr;
+            let w = fase * std::f32::consts::TAU;
+            (w.sin() * 0.5 + (2.0 * w).sin() * 0.25 + (3.0 * w).sin() * 0.12) * 0.6
+        })
+        .collect();
+    let mut peor = 0f32;
+    let mut detalle = vec![];
+    for (estilo, alg) in [(0u8, 0u8), (0, 1), (1, 0), (2, 0), (2, 1)] {
+        let tp = TuneP { on: true, key: 9, scale: 0, speed: 0.45, mix: 1.0, gain: 1.0, mask: scale_mask(9, 0), estilo, algoritmo: alg, mezcla: 1.0 };
+        let o = noname_studio::fx::autotune(&voz, sr, &tp).out;
+        let mut maxc = 0f32;
+        for k in 6..((o.len() - 2048) / 1024) {
+            if let Some(h) = noname_studio::fx::yin(&o[k * 1024..k * 1024 + 2048], sr) {
+                maxc = maxc.max((1200.0 * (h / 440.0).log2()).abs());
+            }
+        }
+        peor = peor.max(maxc);
+        detalle.push(format!("{}{} ±{maxc:.0}¢", noname_studio::fx::ESTILOS[estilo as usize].nombre, if alg == 1 { " (baja demora)" } else { "" }));
+    }
+    all &= ok(peor < 12.0, "Precisión con vibrato (+25 ¢ ± 40 ¢ → La 440)", detalle.join(" · "));
+
+    // 21. Retune: dos notas (La y Mi con vibrato); se detectan, la primera se sube a Do y se aplana
+    let sr = 44_100.0f32;
+    let mut fase = 0f32;
+    let voz: Vec<f32> = (0..(sr as usize * 2))
+        .map(|i| {
+            let t = i as f32 / sr;
+            if (0.95..1.05).contains(&t) {
+                return 0.0;
+            }
+            let base = if t < 1.0 { 440.0 } else { 329.63 };
+            let f = base * 2f32.powf(30.0 * (t * 5.5 * std::f32::consts::TAU).sin() / 1200.0);
+            fase += f / sr;
+            let w = fase * std::f32::consts::TAU;
+            (w.sin() * 0.5 + (2.0 * w).sin() * 0.25 + (3.0 * w).sin() * 0.12) * 0.6
+        })
+        .collect();
+    let cont = noname_studio::fx::contorno(&voz, sr);
+    let mut notas = noname_studio::fx::notas_de(&cont);
+    let detectadas: Vec<String> = notas.iter().map(|n| format!("{:.2}", n.centro)).collect();
+    if let Some(n) = notas.first_mut() {
+        n.objetivo = 72.0;
+    }
+    let o = noname_studio::fx::retune(&voz, sr, &cont, &notas, 1.0);
+    let medir_tramo = |a: f32, b: f32| -> (f32, f32) {
+        let mut v = vec![];
+        let mut k = (a * sr) as usize;
+        while k + 2048 < (b * sr) as usize {
+            if let Some(h) = noname_studio::fx::yin(&o[k..k + 2048], sr) {
+                v.push(1200.0 * (h / 440.0).log2() / 100.0 + 69.0);
+            }
+            k += 1024;
+        }
+        let m = v.iter().sum::<f32>() / v.len().max(1) as f32;
+        let dev = v.iter().fold(0f32, |d, x| d.max((x - m).abs())) * 100.0;
+        (m, dev)
+    };
+    let (m1, d1) = medir_tramo(0.2, 0.85);
+    let (m2, d2) = medir_tramo(1.3, 1.85);
+    all &= ok(notas.len() == 2 && (m1 - 72.0).abs() < 0.1 && d1 < 10.0 && (m2 - 64.0).abs() < 0.1, "Retune (2 notas; La → Do, aplanado)", format!("notas detectadas {detectadas:?} · 1ª sale {m1:.2} (±{d1:.0}¢) · 2ª sale {m2:.2} (±{d2:.0}¢)"));
+
+    // 22. pistas de la playlist: silencio, solo, volumen y paneo
+    let mut base = Project::demo();
+    base.vinyl = 0.0;
+    let pico = |a: &[f32], lado: usize| a.chunks(2).fold(0f32, |m, f| m.max(f[lado].abs()));
+    let a0 = render(&base, &Bank::default());
+    let mut q = base.clone();
+    for t in 0..q.tracks.len() {
+        q.pista_mut(t).mute = true;
+    }
+    let a_mute = render(&q, &Bank::default());
+    let mut q = base.clone();
+    for t in 0..q.tracks.len() {
+        q.pista_mut(t).vol = 0.5;
+    }
+    let a_vol = render(&q, &Bank::default());
+    let mut q = base.clone();
+    for t in 0..q.tracks.len() {
+        q.pista_mut(t).pan = -1.0;
+    }
+    q.limiter.on = false;
+    let a_pan = render(&q, &Bank::default());
+    let rms = |a: &[f32]| (a.iter().map(|v| v * v).sum::<f32>() / a.len() as f32).sqrt();
+    let dv = 20.0 * (rms(&a_vol) / rms(&a0)).log10();
+    let (pl, pr) = (pico(&a_pan, 0), pico(&a_pan, 1));
+    all &= ok(pico(&a_mute, 0) < 1e-4 && dv < -3.0 && dv > -9.0 && pr < pl * 0.35, "Pistas: silencio, volumen y paneo", format!("silenciadas: pico {:.5} · volumen 50 %: {dv:.1} dB · paneo izquierda: izq {pl:.2} / der {pr:.2}", pico(&a_mute, 0)));
+
+    // 23. nivelador de la grabación: una voz bajita queda tan fuerte como al escucharte (y sin cortes)
+    let bajita: Vec<f32> = (0..48_000).map(|i| (i as f32 / 48_000.0 * 220.0 * std::f32::consts::TAU).sin() * 0.05).collect();
+    let niv = noname_studio::fx::nivelar(&bajita, 48_000.0);
+    let pk_in = 0.05f32;
+    let pk_out = niv[24_000..].iter().fold(0f32, |m, v| m.max(v.abs()));
+    let fuerte: Vec<f32> = bajita.iter().map(|v| v * 18.0).collect();
+    let pk_fuerte = noname_studio::fx::nivelar(&fuerte, 48_000.0).iter().fold(0f32, |m, v| m.max(v.abs()));
+    all &= ok(pk_out > 0.3 && pk_fuerte <= 1.0, "Nivelador de la grabación", format!("voz bajita: pico {pk_in:.2} → {pk_out:.2} · voz muy fuerte (pico 0,90): sale {pk_fuerte:.2} sin pasarse de 1"));
+
+    // 24. armonías: La cantado en Do mayor → tercera arriba Do, quinta Mi, octava abajo La grave
+    let sr = 44_100.0f32;
+    let mut fase = 0f32;
+    let la: Vec<f32> = (0..(sr as usize * 2)).map(|i| {
+        let t = i as f32 / sr;
+        let f = 440.0 * 2f32.powf(20.0 * (t * 5.0 * std::f32::consts::TAU).sin() / 1200.0);
+        fase += f / sr;
+        let w = fase * std::f32::consts::TAU;
+        (w.sin() * 0.5 + (2.0 * w).sin() * 0.25 + (3.0 * w).sin() * 0.12) * 0.6
+    }).collect();
+    let mascara = scale_mask(0, 0);
+    let tono = |o: &[f32]| -> f32 {
+        let mut v = vec![];
+        let mut k = (0.3 * sr) as usize;
+        while k + 2048 < (1.7 * sr) as usize {
+            if let Some(h) = noname_studio::fx::yin(&o[k..k + 2048], sr) {
+                v.push(69.0 + 12.0 * (h / 440.0).log2());
+            }
+            k += 2048;
+        }
+        v.sort_by(|a, b| a.total_cmp(b));
+        v.get(v.len() / 2).copied().unwrap_or(0.0)
+    };
+    let t3 = tono(&noname_studio::fx::armonia(&la, sr, mascara, 2, None));
+    let t5 = tono(&noname_studio::fx::armonia(&la, sr, mascara, 4, None));
+    let t8 = tono(&noname_studio::fx::armonia(&la, sr, mascara, 0, Some(-12)));
+    all &= ok((t3 - 72.0).abs() < 0.15 && (t5 - 76.0).abs() < 0.15 && (t8 - 57.0).abs() < 0.15, "Armonías (La en Do mayor)", format!("tercera arriba {t3:.2} (Do 72) · quinta {t5:.2} (Mi 76) · octava abajo {t8:.2} (La 57)"));
 
     let _ = render_song_with;
     println!("{}", if all { "TODO OK" } else { "HAY FALLAS" });

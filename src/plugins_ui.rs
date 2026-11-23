@@ -17,6 +17,8 @@ pub(super) enum Win {
     Inserts(u32),
     Master,
     Settings,
+    Micro,
+    Retune(u32),
 }
 
 pub(super) struct TakeView {
@@ -63,6 +65,18 @@ fn hz_txt(f: f32) -> String {
 impl StudioApp {
     /// Abre ventanas de plugins para revisión visual (opción --plugins).
     pub fn debug_open(&mut self, which: &str) {
+        if let Some(n) = which.strip_prefix("tut").and_then(|x| x.parse::<usize>().ok()) {
+            self.tut = Some(n);
+            self.tut_mostrar(n);
+            return;
+        }
+        self.tut = None;
+        if which == "demo" {
+            self.p = Project::demo();
+            self.fix_selection();
+            self.send();
+            return;
+        }
         if which.contains(',') {
             for w in which.split(',') {
                 self.debug_open(w);
@@ -117,6 +131,39 @@ impl StudioApp {
                 self.open_win(Win::Settings);
                 return;
             }
+            "micro" => {
+                self.mic_panel = true;
+                return;
+            }
+            modo @ ("retune" | "voz") => {
+                // voz de prueba: cuatro notas con vibrato, algunas desafinadas
+                let sr = 44_100.0f32;
+                let mut fase = 0f32;
+                let notas = [(57.3f32, 0.0f32, 0.7f32), (59.8, 0.8, 1.4), (61.2, 1.5, 2.3), (56.7, 2.4, 3.2)];
+                let data: Vec<f32> = (0..(sr * 3.4) as usize).map(|i| {
+                    let t = i as f32 / sr;
+                    let Some(&(m, _, _)) = notas.iter().find(|n| t >= n.1 && t < n.2) else { return 0.0 };
+                    let f = 440.0 * 2f32.powf((m - 69.0) / 12.0 + 0.25 * (t * 5.5 * std::f32::consts::TAU).sin() / 12.0);
+                    fase += f / sr;
+                    let w = fase * std::f32::consts::TAU;
+                    (w.sin() * 0.5 + (2.0 * w).sin() * 0.25 + (3.0 * w).sin() * 0.12) * 0.5
+                }).collect();
+                let dir = self.plat.data_dir.join("audio");
+                let _ = std::fs::create_dir_all(&dir);
+                let ruta = dir.join("voz_prueba_retune.wav");
+                if crate::media::write_wav(&ruta, &crate::media::Buf { ch: 1, sr, data }).is_ok() {
+                    self.import_to_playlist(&ruta, 0, 0);
+                    if let Some(id) = self.p.audio_clips.last().map(|c| c.id).filter(|_| modo == "retune") {
+                        self.abrir_retune(id);
+                    }
+                }
+                return;
+            }
+            w if w.starts_with("aj") => {
+                self.ajuste_sec = w[2..].parse().unwrap_or(0);
+                self.open_win(Win::Settings);
+                return;
+            }
             "fx" if self.p.channels.iter().any(|c| c.inst == Inst::Plugin) => {
                 return;
             }
@@ -144,9 +191,8 @@ impl StudioApp {
                 return;
             }
             "rec" => {
-                self.p.loop_on = true;
-                self.p.loop_a = 0;
-                self.p.loop_b = 1;
+                self.p.loop_on = false;
+                self.p.punch = false;
                 self.send();
                 self.rec_track_start();
                 return;
@@ -236,6 +282,8 @@ impl StudioApp {
             Win::Inserts(id) => format!("Plugins — {}", cn(id)),
             Win::Master => "NN Master — sonoridad y mastering".into(),
             Win::Settings => "Ajustes".into(),
+            Win::Micro => "Micrófono".into(),
+            Win::Retune(_) => "Retune — edita la voz nota por nota".into(),
         }
     }
 
@@ -247,7 +295,7 @@ impl StudioApp {
                 Win::Eq(Some(id)) | Win::Comp(id) | Win::Wave(id) | Win::Tune(id) | Win::Sampler(id) => self.p.channel(id).is_some(),
                 Win::Inserts(id) if id != 0 => self.p.channel(id).is_some(),
                 Win::Auto(id) => self.p.auto_clip(id).is_some(),
-                Win::Clip(id) => self.p.audio_clip(id).is_some(),
+                Win::Clip(id) | Win::Retune(id) => self.p.audio_clip(id).is_some(),
                 _ => true,
             };
             if !exists {
@@ -261,7 +309,7 @@ impl StudioApp {
                 .resizable(false)
                 .collapsible(true)
                 .default_pos(Pos2::new(120.0 + i as f32 * 30.0, 110.0 + i as f32 * 30.0))
-                .frame(Frame::window(&ctx.global_style()).fill(Color32::from_rgb(30, 33, 38)))
+                .frame(Frame::window(&ctx.global_style()).fill(Color32::from_rgb(23, 24, 27)))
                 .show(ctx, |ui| match w {
                     Win::Eq(ch) => self.eq_window(ui, ch),
                     Win::Comp(ch) => self.comp_window(ui, ch),
@@ -276,10 +324,18 @@ impl StudioApp {
                     Win::Inserts(ch) => self.inserts_window(ui, ch),
                     Win::Master => self.master_window(ui),
                     Win::Settings => self.settings_window(ui),
+                    Win::Retune(id) => self.retune_window(ui, id),
+                    Win::Micro => {
+                        ui.label("El micrófono ahora está en el panel de abajo.");
+                    }
                 });
             if !open {
                 close.push(w);
             }
+        }
+        // al cerrar el Retune se deja de escuchar
+        if close.iter().any(|w| matches!(w, Win::Retune(_))) {
+            self.retune_detener();
         }
         self.wins.retain(|w| !close.contains(w));
     }
@@ -321,19 +377,19 @@ impl StudioApp {
         let w = if self.plat.mobile { 520.0 } else { 620.0 };
         let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 250.0), Sense::click_and_drag());
         let p = ui.painter_at(rect);
-        p.rect_filled(rect, 6, Color32::from_rgb(16, 18, 21));
+        p.rect_filled(rect, 6, Color32::from_rgb(12, 13, 15));
         let fx_ = |f: f32| rect.left() + (f / 20.0).log10() / 3.0 * rect.width();
         let xf = |x: f32| 20.0 * 10f32.powf(3.0 * ((x - rect.left()) / rect.width()).clamp(0.0, 1.0));
         let gy = |db: f32| rect.center().y - db / 18.0 * (rect.height() / 2.0 - 10.0);
         let yg = |y: f32| ((rect.center().y - y) / (rect.height() / 2.0 - 10.0) * 18.0).clamp(-18.0, 18.0);
         for f in [50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0] {
             let x = fx_(f);
-            p.vline(x, rect.y_range(), Stroke::new(1.0, Color32::from_rgb(34, 38, 44)));
+            p.vline(x, rect.y_range(), Stroke::new(1.0, Color32::from_rgb(26, 27, 31)));
             p.text(Pos2::new(x + 3.0, rect.bottom() - 4.0), Align2::LEFT_BOTTOM, hz_txt(f), FontId::proportional(9.5), DIM);
         }
         for db in [-12.0, -6.0, 0.0, 6.0, 12.0] {
-            p.hline(rect.x_range(), gy(db), Stroke::new(1.0, if db == 0.0 { Color32::from_rgb(52, 58, 66) } else { Color32::from_rgb(30, 34, 39) }));
-            p.text(Pos2::new(rect.left() + 4.0, gy(db) - 2.0), Align2::LEFT_BOTTOM, format!("{db:+}"), FontId::proportional(9.0), Color32::from_rgb(90, 98, 110));
+            p.hline(rect.x_range(), gy(db), Stroke::new(1.0, if db == 0.0 { Color32::from_rgb(40, 41, 47) } else { Color32::from_rgb(23, 24, 28) }));
+            p.text(Pos2::new(rect.left() + 4.0, gy(db) - 2.0), Align2::LEFT_BOTTOM, format!("{db:+}"), FontId::proportional(9.0), Color32::from_rgb(67, 70, 79));
         }
         if show_spec && !self.spec.is_empty() {
             let n = self.spec.len();
@@ -479,9 +535,9 @@ impl StudioApp {
             // curva de transferencia
             let (rect, _) = ui.allocate_exact_size(Vec2::splat(120.0), Sense::hover());
             let p = ui.painter();
-            p.rect_filled(rect, 4, Color32::from_rgb(16, 18, 21));
+            p.rect_filled(rect, 4, Color32::from_rgb(12, 13, 15));
             let map = |db: f32| (db + 60.0) / 60.0;
-            p.line_segment([rect.left_bottom(), rect.right_top()], Stroke::new(1.0, Color32::from_rgb(45, 50, 58)));
+            p.line_segment([rect.left_bottom(), rect.right_top()], Stroke::new(1.0, Color32::from_rgb(35, 36, 41)));
             let pts: Vec<Pos2> = (0..=60).map(|i| {
                 let inp = -60.0 + i as f32;
                 let over = inp - c.threshold;
@@ -490,7 +546,7 @@ impl StudioApp {
             }).collect();
             p.add(egui::Shape::line(pts, Stroke::new(2.0, ACCENT)));
             let ty = rect.bottom() - map(c.threshold) * rect.height();
-            p.hline(rect.x_range(), ty, Stroke::new(1.0, Color32::from_rgb(90, 70, 40)));
+            p.hline(rect.x_range(), ty, Stroke::new(1.0, Color32::from_rgb(24, 52, 94)));
             ui.vertical(|ui| {
                 egui::Grid::new(ui.next_auto_id()).spacing(Vec2::new(2.0, 2.0)).show(ui, |ui| {
                     kn!(ui, st, chg, &mut c.threshold, -48.0, 0.0, -18.0, "Umbral", |v| format!("{v:.0} dB"));
@@ -588,7 +644,7 @@ impl StudioApp {
         let (mut st, mut chg) = (false, false);
         let (rect, _) = ui.allocate_exact_size(Vec2::new(420.0, 90.0), Sense::hover());
         let p = ui.painter();
-        p.rect_filled(rect, 5, Color32::from_rgb(16, 18, 21));
+        p.rect_filled(rect, 5, Color32::from_rgb(12, 13, 15));
         let pre = v.predelay_ms / 250.0 * rect.width() * 0.25;
         let tail = 0.4 + v.decay * 3.0 + v.size;
         let pts: Vec<Pos2> = (0..=100).map(|i| {
@@ -597,7 +653,7 @@ impl StudioApp {
             let a = (-t * 5.0 / tail).exp() * (1.0 - v.damp * 0.5 * t);
             Pos2::new(x, rect.bottom() - 6.0 - a * (rect.height() - 14.0))
         }).collect();
-        p.vline(rect.left() + pre, rect.y_range(), Stroke::new(1.0, Color32::from_rgb(90, 70, 40)));
+        p.vline(rect.left() + pre, rect.y_range(), Stroke::new(1.0, Color32::from_rgb(24, 52, 94)));
         p.add(egui::Shape::line(pts, Stroke::new(2.0, ACCENT)));
         p.text(rect.right_top() + Vec2::new(-6.0, 6.0), Align2::RIGHT_TOP, format!("cola ~ {:.1} s", tail * 0.8), FontId::proportional(10.0), DIM);
         egui::Grid::new("verbk").spacing(Vec2::new(4.0, 2.0)).show(ui, |ui| {
@@ -629,7 +685,7 @@ impl StudioApp {
         let (mut st, mut chg) = (false, false);
         let (rect, _) = ui.allocate_exact_size(Vec2::new(420.0, 90.0), Sense::hover());
         let p = ui.painter();
-        p.rect_filled(rect, 5, Color32::from_rgb(12, 14, 20));
+        p.rect_filled(rect, 5, Color32::from_rgb(10, 11, 13));
         let t = ui.input(|i| i.time) as f32;
         for i in 0..8 {
             let r = [1.0, 1.131, 1.273, 1.414, 1.531, 1.672, 1.797, 1.971][i];
@@ -679,7 +735,7 @@ impl StudioApp {
         });
         ui.horizontal_top(|ui| {
             for (k, o) in s.osc.iter_mut().enumerate() {
-                Frame::new().fill(Color32::from_rgb(22, 25, 30)).corner_radius(6).inner_margin(6).show(ui, |ui| {
+                Frame::new().fill(Color32::from_rgb(17, 18, 21)).corner_radius(6).inner_margin(6).show(ui, |ui| {
                     ui.vertical(|ui| {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(format!("OSC {}", if k == 0 { "A" } else { "B" })).strong().color(ACCENT2));
@@ -691,8 +747,8 @@ impl StudioApp {
                         });
                         let (rect, _) = ui.allocate_exact_size(Vec2::new(200.0, 60.0), Sense::hover());
                         let p = ui.painter();
-                        p.rect_filled(rect, 4, Color32::from_rgb(12, 14, 17));
-                        p.hline(rect.x_range(), rect.center().y, Stroke::new(1.0, Color32::from_rgb(34, 38, 44)));
+                        p.rect_filled(rect, 4, Color32::from_rgb(10, 10, 12));
+                        p.hline(rect.x_range(), rect.center().y, Stroke::new(1.0, Color32::from_rgb(26, 27, 31)));
                         let pts: Vec<Pos2> = (0..=100).map(|i| {
                             let ph = i as f32 / 100.0;
                             Pos2::new(rect.left() + ph * rect.width(), rect.center().y - fx::wt_sample(o.wt, ph) * (rect.height() / 2.0 - 4.0))
@@ -720,7 +776,7 @@ impl StudioApp {
             }
         });
         ui.horizontal_top(|ui| {
-            Frame::new().fill(Color32::from_rgb(22, 25, 30)).corner_radius(6).inner_margin(6).show(ui, |ui| {
+            Frame::new().fill(Color32::from_rgb(17, 18, 21)).corner_radius(6).inner_margin(6).show(ui, |ui| {
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("FILTRO").strong().color(ACCENT2));
@@ -742,7 +798,7 @@ impl StudioApp {
                 });
             });
             for (label, env) in [("AMP", &mut s.amp), ("ENV FILTRO", &mut s.fadsr)] {
-                Frame::new().fill(Color32::from_rgb(22, 25, 30)).corner_radius(6).inner_margin(6).show(ui, |ui| {
+                Frame::new().fill(Color32::from_rgb(17, 18, 21)).corner_radius(6).inner_margin(6).show(ui, |ui| {
                     ui.vertical(|ui| {
                         ui.label(RichText::new(label).strong().color(ACCENT2));
                         adsr_view(ui, env);
@@ -755,7 +811,7 @@ impl StudioApp {
                     });
                 });
             }
-            Frame::new().fill(Color32::from_rgb(22, 25, 30)).corner_radius(6).inner_margin(6).show(ui, |ui| {
+            Frame::new().fill(Color32::from_rgb(17, 18, 21)).corner_radius(6).inner_margin(6).show(ui, |ui| {
                 ui.vertical(|ui| {
                     ui.label(RichText::new("LFO").strong().color(ACCENT2));
                     ui.horizontal(|ui| {
@@ -791,7 +847,7 @@ impl StudioApp {
         for (i, m) in whites.iter().enumerate() {
             if *m + 1 < 72 && is_black(*m + 1) {
                 let r = Rect::from_min_size(Pos2::new(rect.left() + (i as f32 + 0.65) * kw, rect.top()), Vec2::new(kw * 0.7, rect.height() * 0.6));
-                p.rect_filled(r, 2, Color32::from_rgb(20, 20, 22));
+                p.rect_filled(r, 2, Color32::from_rgb(14, 14, 17));
                 blacks.push((r, *m + 1));
             }
         }
@@ -869,12 +925,12 @@ impl StudioApp {
                     ui.label(RichText::new(format!("Grabando {el:.1} / {mx:.1} s")).color(RED));
                     let lvl = self.in_meter;
                     let (r, _) = ui.allocate_exact_size(Vec2::new(120.0, 8.0), Sense::hover());
-                    ui.painter().rect_filled(r, 2, Color32::from_rgb(11, 13, 15));
+                    ui.painter().rect_filled(r, 2, Color32::from_rgb(9, 9, 11));
                     let f = ((20.0 * lvl.max(1e-5).log10() + 48.0) / 48.0).clamp(0.0, 1.0);
                     ui.painter().rect_filled(Rect::from_min_size(r.min, Vec2::new(r.width() * f, r.height())), 2, if f > 0.9 { RED } else { GREEN });
                 } else {
                     let txt = format!("Grabar en «{}»", self.cur_pat().name);
-                    if ui.add(egui::Button::new(RichText::new(txt.clone()).color(Color32::WHITE)).fill(Color32::from_rgb(150, 40, 40)).min_size(Vec2::new(150.0, 30.0))).clicked() {
+                    if ui.add(egui::Button::new(RichText::new(txt.clone()).color(Color32::WHITE)).fill(Color32::from_rgb(24, 30, 158)).min_size(Vec2::new(150.0, 30.0))).clicked() {
                         self.rec_start(id);
                     }
                     if self.raws.contains_key(&(pat, id)) && ui.button("Borrar toma").clicked() {
@@ -889,7 +945,7 @@ impl StudioApp {
         // gráfico de afinación
         let (rect, _) = ui.allocate_exact_size(Vec2::new(640.0, 200.0), Sense::hover());
         let p = ui.painter_at(rect);
-        p.rect_filled(rect, 5, Color32::from_rgb(14, 16, 19));
+        p.rect_filled(rect, 5, Color32::from_rgb(11, 11, 14));
         match self.takes.get(&(pat, id)) {
             None => {
                 p.text(rect.center(), Align2::CENTER_CENTER, "Sin toma en este patrón: pulsa «Grabar» y canta mientras suena el beat.", FontId::proportional(13.0), DIM);
@@ -900,7 +956,7 @@ impl StudioApp {
                 for (i, pk) in v.peaks.iter().enumerate() {
                     let x = rect.left() + i as f32 / n as f32 * rect.width();
                     let h = pk * rect.height() * 0.45;
-                    p.vline(x, (rect.center().y - h)..=(rect.center().y + h), Stroke::new(1.0, Color32::from_rgb(38, 44, 52)));
+                    p.vline(x, (rect.center().y - h)..=(rect.center().y + h), Stroke::new(1.0, Color32::from_rgb(30, 31, 36)));
                 }
                 let voiced: Vec<f32> = v.det.iter().copied().filter(|m| *m > 0.0).collect();
                 let (lo, hi) = if voiced.is_empty() { (48.0, 72.0) } else { (voiced.iter().cloned().fold(f32::MAX, f32::min).floor() - 2.0, voiced.iter().cloned().fold(f32::MIN, f32::max).ceil() + 2.0) };
@@ -908,8 +964,8 @@ impl StudioApp {
                 let y = |m: f32| rect.bottom() - (m - lo) / rg * rect.height();
                 for m in lo as i32..=hi as i32 {
                     if fx::scale_has(t.key, t.scale, m) {
-                        p.hline(rect.x_range(), y(m as f32), Stroke::new(1.0, if (m - t.key as i32).rem_euclid(12) == 0 { Color32::from_rgb(90, 70, 40) } else { Color32::from_rgb(32, 36, 42) }));
-                        p.text(Pos2::new(rect.left() + 3.0, y(m as f32) - 1.0), Align2::LEFT_BOTTOM, nname(m as u8), FontId::proportional(8.5), Color32::from_rgb(90, 98, 110));
+                        p.hline(rect.x_range(), y(m as f32), Stroke::new(1.0, if (m - t.key as i32).rem_euclid(12) == 0 { Color32::from_rgb(24, 52, 94) } else { Color32::from_rgb(25, 26, 30) }));
+                        p.text(Pos2::new(rect.left() + 3.0, y(m as f32) - 1.0), Align2::LEFT_BOTTOM, nname(m as u8), FontId::proportional(8.5), Color32::from_rgb(67, 70, 79));
                     }
                 }
                 let nf = v.det.len().max(1);
@@ -959,13 +1015,19 @@ impl StudioApp {
             self.msg = "No hay salida de audio.".into();
             return;
         }
-        match audio::record(self.status.clone()) {
+        self.mic_mon = None;
+        match audio::record(self.status.clone(), &self.settings.entrada, true, self.settings.canal_entrada as usize) {
             Ok(r) => {
+                if self.settings.metro_grabar {
+                    self.cmd(Cmd::Metronome(true));
+                }
                 let max_s = (self.cur_pat().len_steps() as f64 * self.p.step_secs()) as f32;
                 let pat = self.sel_pat;
                 self.song_mode = false;
                 self.play(0);
                 self.rec = Some(RecState { r, pat, ch, max_s, started: Instant::now() });
+                // después de guardar la grabación: así la escucha usa este micrófono y no abre otro
+                self.escucha_sync();
                 self.msg = format!("Grabando en «{}» ({:.1} s)…", self.cur_pat().name, max_s);
             }
             Err(e) => self.msg = format!("No se pudo grabar: {e}"),
@@ -975,6 +1037,8 @@ impl StudioApp {
     pub(super) fn rec_stop(&mut self) {
         let Some(rs) = self.rec.take() else { return };
         self.stop();
+        self.cmd(Cmd::Metronome(self.metro));
+        self.escucha_sync();
         let sr = rs.r.sr;
         let mut data = rs.r.buf.lock().map(|b| b.clone()).unwrap_or_default();
         drop(rs.r);
@@ -982,6 +1046,9 @@ impl StudioApp {
         if data.len() < sr as usize / 4 {
             self.msg = "La toma es demasiado corta.".into();
             return;
+        }
+        if self.settings.nivelar_grabacion {
+            data = crate::fx::nivelar(&data, sr as f32);
         }
         let dir = self.plat.data_dir.join("audio");
         let _ = std::fs::create_dir_all(&dir);
@@ -1088,7 +1155,7 @@ fn gr_bar(ui: &mut Ui, gr_db: f32) {
         ui.label(RichText::new("GR").small().color(DIM));
         let (r, _) = ui.allocate_exact_size(Vec2::new(140.0, 10.0), Sense::hover());
         let p = ui.painter();
-        p.rect_filled(r, 2, Color32::from_rgb(11, 13, 15));
+        p.rect_filled(r, 2, Color32::from_rgb(9, 9, 11));
         let f = (gr_db / 24.0).clamp(0.0, 1.0);
         p.rect_filled(Rect::from_min_max(Pos2::new(r.right() - r.width() * f, r.top()), r.right_bottom()), 2, ACCENT);
         ui.label(RichText::new(format!("-{:.1} dB", gr_db.abs())).small().monospace().color(ACCENT2));
@@ -1098,7 +1165,7 @@ fn gr_bar(ui: &mut Ui, gr_db: f32) {
 fn adsr_view(ui: &mut Ui, e: &[f32; 4]) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(168.0, 50.0), Sense::hover());
     let p = ui.painter();
-    p.rect_filled(rect, 4, Color32::from_rgb(12, 14, 17));
+    p.rect_filled(rect, 4, Color32::from_rgb(10, 10, 12));
     let total = e[0] + e[1] + 0.4 + e[3];
     let sx = rect.width() / total.max(0.01);
     let y = |v: f32| rect.bottom() - 4.0 - v * (rect.height() - 8.0);

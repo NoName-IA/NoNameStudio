@@ -460,6 +460,126 @@ pub struct TuneResult {
     pub hop: usize,
 }
 
+/// Una voz extra de un estilo: semitonos fijos o grados de la escala (3ra = 2 grados, 5ta = 4).
+#[derive(Clone, Copy, PartialEq)]
+pub enum Voz {
+    Semis(i32),
+    Grados(i32),
+}
+
+/// Un estilo (preset) de NN Tune.
+pub struct Estilo {
+    pub nombre: &'static str,
+    pub categoria: u8,
+    pub ayuda: &'static str,
+    /// la voz principal se mueve estos semitonos después de afinarse
+    pub mueve: i32,
+    /// velocidad de corrección permitida (mín, máx): (0,0) = robot
+    pub vel: (f32, f32),
+    /// voces extra con su volumen
+    pub voces: [Option<(Voz, f32)>; 2],
+    /// cambia también el timbre (ardilla, monstruo): usa el desplazador de dos cabezales
+    pub timbre: bool,
+}
+
+pub const CATEGORIAS: [&str; 4] = ["Esenciales", "Hip hop", "Hyperpop", "Ciencia ficción"];
+
+pub const ESTILOS: [Estilo; 15] = [
+    Estilo { nombre: "Clásico", categoria: 0, ayuda: "Corrección clásica, ajustable con la perilla", mueve: 0, vel: (0.0, 1.0), voces: [None, None], timbre: false },
+    Estilo { nombre: "Natural", categoria: 0, ayuda: "Corrige sin que se note", mueve: 0, vel: (0.55, 1.0), voces: [None, None], timbre: false },
+    Estilo { nombre: "Robot", categoria: 0, ayuda: "El efecto robot de siempre, al instante", mueve: 0, vel: (0.0, 0.0), voces: [None, None], timbre: false },
+    Estilo { nombre: "Dúo", categoria: 0, ayuda: "Tu voz y otra una octava más grave", mueve: 0, vel: (0.0, 1.0), voces: [Some((Voz::Semis(-12), 0.6)), None], timbre: false },
+    Estilo { nombre: "Tercera", categoria: 0, ayuda: "Tu voz y una armonía una tercera arriba", mueve: 0, vel: (0.0, 1.0), voces: [Some((Voz::Grados(2), 0.6)), None], timbre: false },
+    Estilo { nombre: "Ardilla", categoria: 0, ayuda: "Tu voz una octava más aguda", mueve: 12, vel: (0.0, 1.0), voces: [None, None], timbre: true },
+    Estilo { nombre: "Gran armonía", categoria: 0, ayuda: "Tu voz con una tercera y una quinta: un coro de tres", mueve: 0, vel: (0.0, 1.0), voces: [Some((Voz::Grados(2), 0.5)), Some((Voz::Grados(4), 0.42))], timbre: false },
+    Estilo { nombre: "Trap", categoria: 1, ayuda: "Robot duro con una octava grave por debajo", mueve: 0, vel: (0.0, 0.0), voces: [Some((Voz::Semis(-12), 0.35)), None], timbre: false },
+    Estilo { nombre: "Melódico", categoria: 1, ayuda: "Corrección suave con una armonía una tercera abajo", mueve: 0, vel: (0.2, 0.6), voces: [Some((Voz::Grados(-2), 0.4)), None], timbre: false },
+    Estilo { nombre: "Voz grave", categoria: 1, ayuda: "Tu voz una octava más grave, sin sonar a monstruo", mueve: -12, vel: (0.0, 1.0), voces: [None, None], timbre: false },
+    Estilo { nombre: "Hyper", categoria: 2, ayuda: "Aguda y robótica, al estilo hyperpop", mueve: 12, vel: (0.0, 0.0), voces: [None, None], timbre: true },
+    Estilo { nombre: "Brillo", categoria: 2, ayuda: "Robot con una octava aguda encima que brilla", mueve: 0, vel: (0.0, 0.0), voces: [Some((Voz::Semis(12), 0.45)), None], timbre: false },
+    Estilo { nombre: "Robot grave", categoria: 3, ayuda: "Una octava abajo y robótica: voz de máquina", mueve: -12, vel: (0.0, 0.0), voces: [None, None], timbre: true },
+    Estilo { nombre: "Alien", categoria: 3, ayuda: "Robot con una quinta arriba y una octava abajo", mueve: 0, vel: (0.0, 0.0), voces: [Some((Voz::Semis(7), 0.55)), Some((Voz::Semis(-12), 0.4))], timbre: false },
+    Estilo { nombre: "Coro", categoria: 3, ayuda: "Tu voz con una octava abajo y otra arriba", mueve: 0, vel: (0.4, 1.0), voces: [Some((Voz::Semis(-12), 0.45)), Some((Voz::Semis(12), 0.32))], timbre: false },
+];
+
+fn estilo(p: &TuneP) -> &'static Estilo {
+    &ESTILOS[(p.estilo as usize).min(ESTILOS.len() - 1)]
+}
+
+/// ¿La nota está permitida por la escala de NN Tune?
+pub fn en_escala(p: &TuneP, n: i32) -> bool {
+    if p.mask != 0 {
+        (p.mask >> n.rem_euclid(12)) & 1 == 1
+    } else {
+        scale_has(p.key, p.scale, n)
+    }
+}
+/// Velocidad de corrección efectiva según el estilo.
+pub fn velocidad(p: &TuneP) -> f32 {
+    let (a, b) = estilo(p).vel;
+    p.speed.clamp(a, b)
+}
+/// Mueve `k` grados de la escala desde la nota `n` (k negativo = hacia abajo).
+pub fn grados(p: &TuneP, n: i32, k: i32) -> i32 {
+    let todas = (0..12).all(|d| en_escala(p, n + d));
+    if todas {
+        // cromática: tercera mayor y quinta justa
+        return n + match k {
+            2 => 4,
+            -2 => -3,
+            4 => 7,
+            -4 => -7,
+            x => x,
+        };
+    }
+    let paso = k.signum();
+    let mut m = n;
+    let mut c = 0;
+    while c < k.abs() && (m - n).abs() < 12 {
+        m += paso;
+        if en_escala(p, m) {
+            c += 1;
+        }
+    }
+    m
+}
+/// Nota de la voz principal y de las voces extra (con su volumen) para la nota corregida.
+pub fn voces(p: &TuneP, best: i32) -> (i32, [Option<(i32, f32)>; 2]) {
+    let e = estilo(p);
+    let mut extra = [None, None];
+    for (k, v) in e.voces.iter().enumerate() {
+        if let Some((voz, g)) = v {
+            let nota = match voz {
+                Voz::Semis(s) => best + s,
+                Voz::Grados(d) => grados(p, best, *d),
+            };
+            extra[k] = Some((nota, *g * p.mezcla));
+        }
+    }
+    (best + e.mueve, extra)
+}
+/// ¿Este estilo usa el desplazador de dos cabezales (cambia el timbre) o el algoritmo de baja demora?
+pub fn usa_cabezales(p: &TuneP) -> bool {
+    estilo(p).timbre || p.algoritmo == 1
+}
+/// Nota de la escala más cercana, con histéresis respecto a la anterior.
+fn nota_objetivo(p: &TuneP, midi: f32, last: Option<i32>) -> i32 {
+    let mut best = midi.round() as i32;
+    let mut bd = f32::MAX;
+    for n in (midi.round() as i32 - 6)..=(midi.round() as i32 + 6) {
+        if en_escala(p, n) && (n as f32 - midi).abs() < bd {
+            bd = (n as f32 - midi).abs();
+            best = n;
+        }
+    }
+    if let Some(prev) = last {
+        if prev != best && en_escala(p, prev) && (prev as f32 - midi).abs() < bd + 0.35 {
+            best = prev;
+        }
+    }
+    best
+}
+
 pub fn scale_has(key: u8, scale: u8, note: i32) -> bool {
     let d = (note - key as i32).rem_euclid(12);
     match scale {
@@ -501,6 +621,19 @@ pub fn yin(x: &[f32], sr: f32) -> Option<f32> {
         }
         tau += 1;
     }
+    let (mut bt, mut bv) = (0usize, f32::MAX);
+    for t in tmin.max(2)..tmax {
+        if dn[t] < bv {
+            bv = dn[t];
+            bt = t;
+        }
+    }
+    if bv < 0.3 && bt > 0 {
+        let (a, b, c) = (dn[bt - 1], dn[bt], dn[bt + 1]);
+        let den = a - 2.0 * b + c;
+        let off = if den.abs() > 1e-9 { 0.5 * (a - c) / den } else { 0.0 };
+        return Some(sr / (bt as f32 + off.clamp(-1.0, 1.0)));
+    }
     None
 }
 
@@ -512,9 +645,6 @@ pub fn autotune(x: &[f32], sr: f32, p: &TuneP) -> TuneResult {
     let frames = x.len() / hop + 1;
     let mut detected = vec![0f32; frames];
     let mut corrected = vec![0f32; frames];
-    let mut ratio = vec![1f32; frames];
-    let alpha = 1.0 - p.speed.clamp(0.0, 1.0) * 0.95;
-    let mut rs = 1.0f32;
     let mut last_note: Option<i32> = None;
     // la detección se hace a media resolución (4 veces más rápida, sobra para la voz)
     let xd: Vec<f32> = x.chunks(2).map(|c| c.iter().sum::<f32>() / c.len() as f32).collect();
@@ -528,69 +658,723 @@ pub fn autotune(x: &[f32], sr: f32, p: &TuneP) -> TuneResult {
         } else {
             None
         };
-        if target.is_none() {
-            last_note = None;
-        }
-        let r = match target {
-            Some(hz) if p.on => {
-                let midi = 69.0 + 12.0 * (hz / 440.0).log2();
-                let mut best = midi.round() as i32;
-                let mut bd = f32::MAX;
-                for n in (midi.round() as i32 - 6)..=(midi.round() as i32 + 6) {
-                    if scale_has(p.key, p.scale, n) && (n as f32 - midi).abs() < bd {
-                        bd = (n as f32 - midi).abs();
-                        best = n;
-                    }
-                }
-                // histéresis: no salta de nota mientras la voz siga cerca de la anterior
-                if let Some(prev) = last_note {
-                    if prev != best && scale_has(p.key, p.scale, prev) && (prev as f32 - midi).abs() < bd + 0.35 {
-                        best = prev;
-                    }
-                }
-                last_note = Some(best);
-                detected[f] = midi;
-                corrected[f] = best as f32;
-                2f32.powf((best as f32 - midi) / 12.0)
-            }
+        match target {
             Some(hz) => {
-                detected[f] = 69.0 + 12.0 * (hz / 440.0).log2();
-                1.0
+                let midi = 69.0 + 12.0 * (hz / 440.0).log2();
+                detected[f] = midi;
+                if p.on {
+                    let best = nota_objetivo(p, midi, last_note);
+                    last_note = Some(best);
+                    corrected[f] = voces(p, best).0 as f32;
+                }
             }
-            None => 1.0,
-        };
-        rs += (r - rs) * alpha;
-        ratio[f] = rs;
-
+            None => last_note = None,
+        }
     }
-    // desplazador de tono de dos cabezales con ventanas complementarias
-    let wd = 0.035 * sr;
-    let mut out = vec![0f32; x.len()];
-    let mut phase = 0.0f32;
-    let read = |pos: f32| -> f32 {
-        if pos < 0.0 {
-            return 0.0;
+    // el sonido sale del mismo motor que en vivo (PSOLA), compensando su retardo
+    let mut tl = TuneLive::new(sr);
+    let lat = tl.latency(p);
+    let mut out = Vec::with_capacity(x.len());
+    for i in 0..x.len() + lat {
+        let v = tl.process(x.get(i).copied().unwrap_or(0.0), p);
+        if i >= lat {
+            out.push(v * p.gain);
         }
-        let i = pos as usize;
-        if i + 1 >= x.len() {
-            return 0.0;
-        }
-        x[i] + (x[i + 1] - x[i]) * pos.fract()
-    };
-    for (n, o) in out.iter_mut().enumerate() {
-        let fpos = n as f32 / hop as f32;
-        let f0 = (fpos as usize).min(frames - 1);
-        let f1 = (f0 + 1).min(frames - 1);
-        let r = ratio[f0] + (ratio[f1] - ratio[f0]) * fpos.fract();
-        phase = (phase + (1.0 - r) / wd).rem_euclid(1.0);
-        let p2 = (phase + 0.5).fract();
-        let d1 = phase * wd;
-        let d2 = p2 * wd;
-        let g1 = (PI * phase).sin().powi(2);
-        let g2 = (PI * p2).sin().powi(2);
-        let base = n as f32 + wd * 0.5;
-        let wet = read(base - d1) * g1 + read(base - d2) * g2;
-        *o = (wet * p.mix + x[n] * (1.0 - p.mix)) * p.gain;
     }
     TuneResult { out, detected, corrected, hop }
+}
+
+/// Afinado con una escala que cambia en el tiempo (por ejemplo, siguiendo los acordes).
+/// `mascara(i)` da las notas permitidas en la muestra `i`.
+pub fn autotune_con(x: &[f32], sr: f32, p: &TuneP, mascara: &dyn Fn(usize) -> u16) -> Vec<f32> {
+    let mut tl = TuneLive::new(sr);
+    let lat = tl.latency(p);
+    let mut q = *p;
+    let mut out = Vec::with_capacity(x.len());
+    for i in 0..x.len() + lat {
+        if i % 256 == 0 {
+            q.mask = mascara(i);
+        }
+        let v = tl.process(x.get(i).copied().unwrap_or(0.0), &q);
+        if i >= lat {
+            out.push(v * p.gain);
+        }
+    }
+    out
+}
+
+/// YIN sin pedir memoria (para el hilo de audio). `d` y `dn` deben medir al menos tmax+1.
+pub fn yin_buf(x: &[f32], sr: f32, d: &mut [f32], dn: &mut [f32]) -> Option<f32> {
+    let w = x.len() / 2;
+    let tmin = (sr / 1000.0) as usize;
+    let tmax = ((sr / 70.0) as usize).min(w - 1).min(d.len() - 1);
+    for tau in 1..=tmax {
+        let mut s = 0.0;
+        for j in 0..w {
+            let v = x[j] - x[j + tau];
+            s += v * v;
+        }
+        d[tau] = s;
+    }
+    let mut cum = 0.0;
+    for tau in 1..=tmax {
+        cum += d[tau];
+        dn[tau] = d[tau] * tau as f32 / cum.max(1e-9);
+    }
+    let mut tau = tmin.max(2);
+    while tau < tmax {
+        if dn[tau] < 0.15 {
+            while tau + 1 < tmax && dn[tau + 1] < dn[tau] {
+                tau += 1;
+            }
+            let (a, b, c) = (dn[tau - 1], dn[tau], dn[tau + 1]);
+            let den = a - 2.0 * b + c;
+            let off = if den.abs() > 1e-9 { 0.5 * (a - c) / den } else { 0.0 };
+            return Some(sr / (tau as f32 + off.clamp(-1.0, 1.0)));
+        }
+        tau += 1;
+    }
+    let (mut bt, mut bv) = (0usize, f32::MAX);
+    for t in tmin.max(2)..tmax {
+        if dn[t] < bv {
+            bv = dn[t];
+            bt = t;
+        }
+    }
+    if bv < 0.3 && bt > 0 {
+        let (a, b, c) = (dn[bt - 1], dn[bt], dn[bt + 1]);
+        let den = a - 2.0 * b + c;
+        let off = if den.abs() > 1e-9 { 0.5 * (a - c) / den } else { 0.0 };
+        return Some(sr / (bt as f32 + off.clamp(-1.0, 1.0)));
+    }
+    None
+}
+
+/// Tamaño de los anillos de audio de NN Tune (potencia de 2).
+const ANILLO: usize = 1 << 14;
+/// Voz principal + hasta dos voces extra.
+const VOCES: usize = 3;
+
+/// NN Tune en tiempo real.
+/// - Algoritmo «Limpio» (PSOLA): corta la voz ciclo por ciclo en sus picos y la vuelve a armar al
+///   ritmo de la nota correcta; la voz conserva su timbre. Tiene ~35 ms de demora.
+/// - «Baja demora» y los estilos que cambian el timbre (Ardilla, Hyper, Robot grave): desplazador
+///   de dos cabezales, sin demora extra.
+pub struct TuneLive {
+    sr: f32,
+    hist: Vec<f32>,
+    hpos: usize,
+    acc: f32,
+    nacc: u8,
+    frame: Vec<f32>,
+    d: Vec<f32>,
+    dn: Vec<f32>,
+    count: usize,
+    last_note: Option<i32>,
+    /// razón de tono y volumen de cada voz (antes y después de la última detección)
+    prev: [f32; VOCES],
+    rs: [f32; VOCES],
+    pg: [f32; VOCES],
+    g: [f32; VOCES],
+    periodo: f32,
+    pub cantada: f32,
+    pub objetivo: i32,
+    // PSOLA
+    inp: Vec<f32>,
+    ola: Vec<f32>,
+    n: usize,
+    lat: usize,
+    tmax: f32,
+    marks: std::collections::VecDeque<usize>,
+    last_mark: usize,
+    ts: [usize; VOCES],
+    /// parte decimal acumulada de la posición de cada voz (sin ella las notas agudas salen altas)
+    frac: [f32; VOCES],
+    // dos cabezales
+    delay: Vec<f32>,
+    dpos: usize,
+    wd: f32,
+    wd_obj: f32,
+    phase: [f32; VOCES],
+    /// nota objetivo de cada voz (en semitonos, suavizada) y su frecuencia antes/después de la detección
+    obj: [f32; VOCES],
+    obj_ok: [bool; VOCES],
+    pf: [f32; VOCES],
+    fs: [f32; VOCES],
+    /// último tono detectado y cuántas detecciones seguidas se ha sostenido sin poder medir
+    ultimo_hz: f32,
+    sostener: u8,
+    /// tono de la detección anterior y largo de la última ventana (para predecir el tono en «Baja demora»)
+    midi_ant: f32,
+    largo: usize,
+    /// la última marca de análisis cayó en voz (se puede comparar su forma de onda)
+    marca_voz: bool,
+    /// Retune: nota exacta (en semitonos, con decimales) a la que se lleva la voz ahora mismo
+    pub ext: Option<f32>,
+}
+
+impl TuneLive {
+    const HOP: usize = 256;
+    pub fn new(sr: f32) -> TuneLive {
+        let n = 1024;
+        let wd = 0.035 * sr;
+        let tmax = sr / 90.0;
+        TuneLive {
+            sr,
+            hist: vec![0.0; n],
+            hpos: 0,
+            acc: 0.0,
+            nacc: 0,
+            frame: vec![0.0; n],
+            d: vec![0.0; n / 2 + 2],
+            dn: vec![1.0; n / 2 + 2],
+            count: 0,
+            last_note: None,
+            prev: [1.0; VOCES],
+            rs: [1.0; VOCES],
+            pg: [1.0, 0.0, 0.0],
+            g: [1.0, 0.0, 0.0],
+            periodo: 0.0,
+            cantada: 0.0,
+            objetivo: -1,
+            inp: vec![0.0; ANILLO],
+            ola: vec![0.0; ANILLO],
+            n: 0,
+            lat: (tmax * 3.0) as usize + 64,
+            tmax,
+            marks: std::collections::VecDeque::with_capacity(512),
+            last_mark: 0,
+            ts: [0; VOCES],
+            frac: [0.0; VOCES],
+            delay: vec![0.0; (0.06 * sr) as usize + 8],
+            dpos: 0,
+            wd,
+            wd_obj: wd,
+            phase: [0.0, 0.33, 0.66],
+            obj: [0.0; VOCES],
+            obj_ok: [false; VOCES],
+            pf: [0.0; VOCES],
+            fs: [0.0; VOCES],
+            ultimo_hz: 0.0,
+            sostener: 0,
+            midi_ant: 0.0,
+            largo: n,
+            marca_voz: false,
+            ext: None,
+        }
+    }
+
+    /// Retardo (en muestras) entre lo que entra y lo que sale con estos ajustes.
+    pub fn latency(&self, p: &TuneP) -> usize {
+        if usa_cabezales(p) { 0 } else { self.lat }
+    }
+
+    pub fn reset(&mut self) {
+        self.hist.iter_mut().for_each(|v| *v = 0.0);
+        self.delay.iter_mut().for_each(|v| *v = 0.0);
+        self.inp.iter_mut().for_each(|v| *v = 0.0);
+        self.ola.iter_mut().for_each(|v| *v = 0.0);
+        self.marks.clear();
+        self.last_mark = self.n;
+        self.ts = [self.n; VOCES];
+        self.prev = [1.0; VOCES];
+        self.rs = [1.0; VOCES];
+        self.pg = [1.0, 0.0, 0.0];
+        self.g = [1.0, 0.0, 0.0];
+        self.periodo = 0.0;
+        self.last_note = None;
+        self.obj_ok = [false; VOCES];
+        self.pf = [0.0; VOCES];
+        self.fs = [0.0; VOCES];
+        self.ultimo_hz = 0.0;
+        self.sostener = 0;
+    }
+
+    fn detect(&mut self, p: &TuneP) {
+        let n = self.hist.len();
+        // si ya se conoce el tono se mide con una ventana corta (3 ciclos): responde mucho más rápido
+        // y sigue el vibrato; si no se encuentra, se mide con la ventana completa
+        let corto = if self.periodo > 0.0 { (((self.periodo / 2.0) * 3.0) as usize * 2).clamp(192, n) } else { n };
+        let mut hz = None;
+        let mut rms = 0.0;
+        for largo in [corto, n] {
+            for i in 0..largo {
+                self.frame[i] = self.hist[(self.hpos + n - largo + i) % n];
+            }
+            rms = (self.frame[..largo].iter().map(|v| v * v).sum::<f32>() / largo as f32).sqrt();
+            hz = if rms > 0.004 { yin_buf(&self.frame[..largo], self.sr / 2.0, &mut self.d, &mut self.dn) } else { None };
+            self.largo = largo;
+            if hz.is_some() || largo == n {
+                break;
+            }
+        }
+        // si en medio de una nota no se pudo medir (respiración, consonante suave) se sostiene el último tono
+        // unos instantes, así no se cuela la voz sin afinar
+        match hz {
+            Some(h) => {
+                self.ultimo_hz = h;
+                self.sostener = 0;
+            }
+            None if rms > 0.004 && self.ultimo_hz > 0.0 && self.sostener < 4 => {
+                self.sostener += 1;
+                hz = Some(self.ultimo_hz);
+            }
+            None => self.ultimo_hz = 0.0,
+        }
+        self.periodo = match hz {
+            Some(h) if h > 60.0 && h < 1100.0 => self.sr / h,
+            _ => 0.0,
+        };
+        if let Some(hz) = hz {
+            let t = self.sr / hz;
+            // ventana de los dos cabezales: corta (pocos ciclos) para que sigan bien el tono
+            let base = if usa_cabezales(p) && estilo(p).timbre { 0.03 * self.sr } else { 0.014 * self.sr };
+            self.wd_obj = (2.0 * t * (base / (2.0 * t)).round().max(1.0)).clamp(0.008 * self.sr, 0.055 * self.sr);
+        }
+        self.cantada = hz.map(|h| 69.0 + 12.0 * (h / 440.0).log2()).unwrap_or(0.0);
+        self.objetivo = -1;
+        let mut r = [1.0f32; VOCES];
+        let mut g = [1.0f32, 0.0, 0.0];
+        match hz {
+            Some(hz) if p.on => {
+                let midi = 69.0 + 12.0 * (hz / 440.0).log2();
+                // en los cabezales el tono medido llega un poco tarde: se predice hacia dónde va la voz
+                let midi_r = if usa_cabezales(p) && self.midi_ant > 0.0 {
+                    let adelanto = self.largo as f32 - self.wd * 0.5 + Self::HOP as f32;
+                    midi + ((midi - self.midi_ant) / Self::HOP as f32 * adelanto).clamp(-1.0, 1.0)
+                } else {
+                    midi
+                };
+                self.midi_ant = midi;
+                let best = nota_objetivo(p, midi, self.last_note);
+                self.last_note = Some(best);
+                self.objetivo = best;
+                let (n1, extra) = voces(p, best);
+                let hay = extra.iter().any(|e| e.is_some());
+                g[0] = if hay { 0.8 } else { 1.0 };
+                let mut meta = [None; VOCES];
+                meta[0] = Some(n1 as f32);
+                for k in 0..2 {
+                    if let Some((nota, vol)) = extra[k] {
+                        meta[k + 1] = Some(nota as f32);
+                        g[k + 1] = vol;
+                    }
+                }
+                // Retune: la nota la decide el editor, sin voces extra ni suavizado
+                if let Some(t) = self.ext {
+                    meta = [Some(t), None, None];
+                    g = [1.0, 0.0, 0.0];
+                    self.objetivo = t.round() as i32;
+                }
+                let alpha = if self.ext.is_some() { 1.0 } else { 1.0 - velocidad(p).clamp(0.0, 1.0) * 0.95 };
+                for k in 0..VOCES {
+                    match meta[k] {
+                        Some(m) => {
+                            if self.obj_ok[k] {
+                                self.obj[k] += (m - self.obj[k]) * alpha;
+                            } else {
+                                // al empezar una nota se cae directo en ella
+                                self.obj[k] = m;
+                                self.obj_ok[k] = true;
+                            }
+                            r[k] = 2f32.powf((self.obj[k] - midi_r) / 12.0);
+                        }
+                        None => {
+                            self.obj_ok[k] = false;
+                            r[k] = self.rs[k];
+                        }
+                    }
+                }
+            }
+            _ => {
+                self.last_note = None;
+                self.midi_ant = 0.0;
+                self.obj_ok = [false; VOCES];
+                r[1] = self.rs[1];
+                r[2] = self.rs[2];
+            }
+        }
+        for k in 0..VOCES {
+            self.pf[k] = self.fs[k];
+            self.fs[k] = if self.obj_ok[k] { 440.0 * 2f32.powf((self.obj[k] - 69.0) / 12.0) } else { 0.0 };
+            if self.pf[k] <= 0.0 {
+                self.pf[k] = self.fs[k];
+            }
+            self.prev[k] = self.rs[k];
+            self.rs[k] = r[k];
+            self.pg[k] = self.g[k];
+            // las voces extra entran y salen suave (sin cortes)
+            self.g[k] += (g[k] - self.g[k]) * if k == 0 { 1.0 } else { 0.3 };
+        }
+    }
+
+    /// Agrega un grano (un ciclo de la voz con ventana) centrado en `ta` de la entrada y en `ts` de la salida.
+    #[inline]
+    fn grano(&mut self, ta: usize, ts: usize, medio: usize, esc: f32) {
+        if ta < medio || ts < medio {
+            return;
+        }
+        let largo = 2 * medio;
+        let k0 = std::f32::consts::TAU / largo as f32;
+        for k in 0..largo {
+            let w = 0.5 - 0.5 * (k0 * k as f32).cos();
+            let s = self.inp[(ta - medio + k) & (ANILLO - 1)];
+            self.ola[(ts - medio + k) & (ANILLO - 1)] += s * w * esc;
+        }
+    }
+
+    /// Marca de análisis más cercana a `t`.
+    fn cercana(&self, t: usize) -> usize {
+        let mut best = t;
+        let mut bd = usize::MAX;
+        for &m in self.marks.iter().rev() {
+            let d = m.abs_diff(t);
+            if d < bd {
+                bd = d;
+                best = m;
+            } else if m < t {
+                break;
+            }
+        }
+        best
+    }
+
+    fn alimentar(&mut self, x: f32, p: &TuneP) {
+        self.acc += x;
+        self.nacc += 1;
+        if self.nacc == 2 {
+            self.hist[self.hpos] = self.acc * 0.5;
+            self.hpos = (self.hpos + 1) % self.hist.len();
+            self.acc = 0.0;
+            self.nacc = 0;
+        }
+        self.count += 1;
+        if self.count >= Self::HOP {
+            self.count = 0;
+            self.detect(p);
+        }
+    }
+
+    /// Solo escucha (detecta el tono) sin cambiar el sonido: para mostrar la nota con el autotune apagado.
+    pub fn escuchar(&mut self, x: f32, p: &TuneP) {
+        let q = TuneP { on: false, ..*p };
+        self.alimentar(x, &q);
+    }
+
+    #[inline]
+    pub fn process(&mut self, x: f32, p: &TuneP) -> f32 {
+        self.alimentar(x, p);
+        let t = self.count as f32 / Self::HOP as f32;
+        let mut r = [1.0f32; VOCES];
+        let mut g = [0.0f32; VOCES];
+        let mut fo = [0.0f32; VOCES];
+        for k in 0..VOCES {
+            r[k] = self.prev[k] + (self.rs[k] - self.prev[k]) * t;
+            g[k] = self.pg[k] + (self.g[k] - self.pg[k]) * t;
+            fo[k] = self.pf[k] + (self.fs[k] - self.pf[k]) * t;
+        }
+        let dlen = self.delay.len();
+        self.delay[self.dpos] = x;
+        self.dpos = (self.dpos + 1) % dlen;
+        self.wd += (self.wd_obj - self.wd) * 0.002;
+        self.inp[self.n & (ANILLO - 1)] = x;
+        self.n += 1;
+        let n = self.n;
+
+        if usa_cabezales(p) {
+            // desplazador de dos cabezales por voz (sin demora extra; cambia también el timbre)
+            let read = |d: f32, buf: &[f32], pos: usize| -> f32 {
+                let at = pos as f32 - 1.0 - d + dlen as f32 * 2.0;
+                let i = at as usize;
+                let f = at.fract();
+                let a = buf[i % dlen];
+                let b = buf[(i + 1) % dlen];
+                a + (b - a) * f
+            };
+            let mut wet = 0.0;
+            for k in 0..VOCES {
+                if k > 0 && g[k] < 0.001 {
+                    continue;
+                }
+                self.phase[k] = (self.phase[k] + (1.0 - r[k]) / self.wd).rem_euclid(1.0);
+                let q = (self.phase[k] + 0.5).fract();
+                let v = read(self.phase[k] * self.wd, &self.delay, self.dpos) * (PI * self.phase[k]).sin().powi(2) + read(q * self.wd, &self.delay, self.dpos) * (PI * q).sin().powi(2);
+                wet += v * g[k];
+            }
+            // las marcas de PSOLA siguen al día por si se cambia de algoritmo
+            self.last_mark = n;
+            self.ts = [n; VOCES];
+            return wet * p.mix + x * (1.0 - p.mix);
+        }
+
+        // ---------- marcas de análisis: un pico por ciclo de la voz
+        let con_voz = self.periodo > 0.0;
+        let paso = if con_voz { self.periodo.min(self.tmax * 1.4) } else { 256.0 };
+        if self.last_mark + ANILLO / 4 < n {
+            self.last_mark = n.saturating_sub(ANILLO / 8);
+        }
+        loop {
+            let pred = (self.last_mark as f32 + paso) as usize;
+            let medio_b = (paso * 0.25) as usize;
+            let mitad = (paso * 0.5) as usize;
+            if pred + medio_b + mitad >= n {
+                break;
+            }
+            let mut mark = pred;
+            if con_voz && self.marca_voz {
+                // la marca va donde la forma de onda más se parece a la del ciclo anterior:
+                // así cada corte cae en el mismo punto del ciclo (sin temblor ni aspereza)
+                let m = ANILLO - 1;
+                let paso_j = if mitad > 96 { 2 } else { 1 };
+                let mut mejor = f32::MIN;
+                for k in pred.saturating_sub(medio_b)..=pred + medio_b {
+                    let (mut c, mut e) = (0.0f32, 1e-9f32);
+                    let mut j = 0;
+                    while j < 2 * mitad {
+                        let a = self.inp[(k + j - mitad) & m];
+                        let b = self.inp[(self.last_mark + j - mitad) & m];
+                        c += a * b;
+                        e += a * a;
+                        j += paso_j;
+                    }
+                    let v = c / e.sqrt();
+                    if v > mejor {
+                        mejor = v;
+                        mark = k;
+                    }
+                }
+            } else if con_voz {
+                let mut mx = f32::MIN;
+                for k in pred.saturating_sub(medio_b)..=pred + medio_b {
+                    let v = self.inp[k & (ANILLO - 1)];
+                    if v > mx {
+                        mx = v;
+                        mark = k;
+                    }
+                }
+            }
+            self.marca_voz = con_voz;
+            let mark = mark.max(self.last_mark + 8);
+            if self.marks.len() == self.marks.capacity() {
+                self.marks.pop_front();
+            }
+            self.marks.push_back(mark);
+            self.last_mark = mark;
+        }
+
+        // ---------- síntesis: granos repartidos al ritmo de cada voz
+        let lectura = n.saturating_sub(self.lat);
+        let medio = (paso.min(self.tmax)) as usize;
+        for k in 0..VOCES {
+            let mut ts = self.ts[k];
+            let mut frac = self.frac[k];
+            let rr = if con_voz { r[k] } else { 1.0 };
+            let gain = if con_voz || k == 0 { g[k] } else { 0.0 };
+            if ts < lectura + medio {
+                ts = lectura + medio;
+                frac = 0.0;
+            }
+            while ts as f32 + 1.5 * paso <= n as f32 {
+                if gain > 0.001 {
+                    let ta = self.cercana(ts);
+                    // al bajar mucho el tono cada pedazo lleva un solo ciclo (si no, se sigue oyendo la nota original)
+                    let (m_k, esc) = if con_voz && rr < 0.75 { (((paso * 0.6) as usize).max(16), gain / rr.clamp(0.25, 4.0) * 1.35) } else { (medio, gain / rr.clamp(0.25, 4.0)) };
+                    self.grano(ta, ts, m_k, esc);
+                }
+                let salto = if con_voz && fo[k] > 20.0 { (self.sr / fo[k]).clamp(16.0, paso * 4.0) } else if con_voz { (paso / rr.clamp(0.25, 4.0)).max(16.0) } else { paso };
+                let s = salto + frac;
+                ts += s as usize;
+                frac = s.fract();
+            }
+            self.ts[k] = ts;
+            self.frac[k] = frac;
+        }
+        let i = lectura & (ANILLO - 1);
+        let wet = self.ola[i];
+        self.ola[i] = 0.0;
+        let dry = self.inp[i];
+        wet * p.mix + dry * (1.0 - p.mix)
+    }
+}
+
+// ============================ Retune: editar la voz nota por nota ============================
+
+/// Una nota detectada en la voz: desde/hasta (en tramos de `RT_HOP` muestras), su tono medio
+/// y el tono al que el usuario la quiere llevar (en semitonos, con decimales).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NotaRt {
+    pub a: usize,
+    pub b: usize,
+    pub centro: f32,
+    pub objetivo: f32,
+}
+
+/// Tramo de análisis del Retune (muestras).
+pub const RT_HOP: usize = 256;
+/// El tramo `h` del contorno describe la voz alrededor de la muestra `h * RT_HOP + RT_CENTRO`.
+pub const RT_CENTRO: usize = 1024;
+
+/// Tono de la voz (en semitonos; 0 = sin tono) cada `RT_HOP` muestras.
+pub fn contorno(x: &[f32], sr: f32) -> Vec<f32> {
+    let win = 2048usize;
+    let frames = x.len() / RT_HOP + 1;
+    let xd: Vec<f32> = x.chunks(2).map(|c| c.iter().sum::<f32>() / c.len() as f32).collect();
+    let wd2 = win / 2;
+    let mut d = vec![0.0f32; wd2 / 2 + 2];
+    let mut dn = vec![1.0f32; wd2 / 2 + 2];
+    let mut out = vec![0f32; frames];
+    for f in 0..frames {
+        let s = f * RT_HOP / 2;
+        if s + wd2 > xd.len() {
+            break;
+        }
+        let fr = &xd[s..s + wd2];
+        let rms = (fr.iter().map(|v| v * v).sum::<f32>() / wd2 as f32).sqrt();
+        if rms > 0.006 {
+            if let Some(h) = yin_buf(fr, sr / 2.0, &mut d, &mut dn) {
+                if h > 60.0 && h < 1100.0 {
+                    out[f] = 69.0 + 12.0 * (h / 440.0).log2();
+                }
+            }
+        }
+    }
+    // se quitan saltos sueltos de octava (un tramo aislado lejos de sus vecinos)
+    for f in 1..out.len().saturating_sub(1) {
+        let (a, b, c) = (out[f - 1], out[f], out[f + 1]);
+        if a > 0.0 && c > 0.0 && b > 0.0 && (a - c).abs() < 1.0 && (b - a).abs() > 6.0 {
+            out[f] = (a + c) * 0.5;
+        }
+    }
+    out
+}
+
+/// Separa el contorno en notas: tramos con voz donde el tono se mantiene cerca de una nota.
+pub fn notas_de(cont: &[f32]) -> Vec<NotaRt> {
+    let mut notas = vec![];
+    let mut i = 0;
+    let n = cont.len();
+    while i < n {
+        if cont[i] <= 0.0 {
+            i += 1;
+            continue;
+        }
+        let a = i;
+        let mut suma = cont[i];
+        let mut cuenta = 1.0;
+        let mut fuera = 0;
+        let mut huecos = 0;
+        let mut j = i + 1;
+        while j < n {
+            let c = cont[j];
+            if c <= 0.0 {
+                huecos += 1;
+                if huecos > 3 {
+                    break;
+                }
+                j += 1;
+                continue;
+            }
+            huecos = 0;
+            let media = suma / cuenta;
+            if (c - media).abs() > 0.75 {
+                fuera += 1;
+                if fuera >= 3 {
+                    j -= 2;
+                    break;
+                }
+            } else {
+                fuera = 0;
+                suma += c;
+                cuenta += 1.0;
+            }
+            j += 1;
+        }
+        let b = j.min(n).max(a + 1);
+        if b - a >= 6 {
+            let mut v: Vec<f32> = cont[a..b].iter().copied().filter(|c| *c > 0.0).collect();
+            v.sort_by(|p, q| p.total_cmp(q));
+            let centro = v[v.len() / 2];
+            notas.push(NotaRt { a, b, centro, objetivo: centro });
+        }
+        i = b.max(a + 1);
+    }
+    notas
+}
+
+/// Aplica el Retune: cada nota se lleva a su objetivo; `aplanar` (0…1) quita el vaivén del tono
+/// dentro de cada nota. Las partes sin cambios quedan tal cual.
+pub fn retune(x: &[f32], sr: f32, cont: &[f32], notas: &[NotaRt], aplanar: f32) -> Vec<f32> {
+    let mut tl = TuneLive::new(sr);
+    let tp_on = TuneP { on: true, key: 0, scale: 0, speed: 0.0, mix: 1.0, gain: 1.0, mask: 0xFFF, estilo: 0, algoritmo: 0, mezcla: 1.0 };
+    let tp_off = TuneP { on: false, ..tp_on };
+    let lat = tl.latency(&tp_on);
+    // la nota que se pide ahora se aplica a la voz que se está armando un poco más atrás
+    let retraso = 450usize;
+    let objetivo_en = |t: usize, k: &mut usize| -> Option<f32> {
+        let h = t.checked_sub(RT_CENTRO)? / RT_HOP;
+        while *k < notas.len() && notas[*k].b <= h {
+            *k += 1;
+        }
+        let nt = notas.get(*k)?;
+        if h < nt.a {
+            return None;
+        }
+        if (nt.objetivo - nt.centro).abs() < 0.005 && aplanar < 0.005 {
+            return None;
+        }
+        let c = cont.get(h).copied().unwrap_or(0.0);
+        Some(if c > 0.0 { nt.objetivo + (c - nt.centro) * (1.0 - aplanar) } else { nt.objetivo })
+    };
+    let mut k = 0;
+    let mut out = Vec::with_capacity(x.len());
+    let mut activo = false;
+    for i in 0..x.len() + lat {
+        if i % 64 == 0 {
+            tl.ext = objetivo_en(i.saturating_sub(retraso), &mut k);
+            activo = tl.ext.is_some();
+        }
+        let v = tl.process(x.get(i).copied().unwrap_or(0.0), if activo { &tp_on } else { &tp_off });
+        if i >= lat {
+            out.push(v);
+        }
+    }
+    out
+}
+
+/// Nivelador de la voz: el mismo que se usa al escucharte (sube la voz a un nivel fuerte y parejo,
+/// sin subir el ruido cuando no cantas, con un limitador suave). Así lo grabado suena como lo oíste.
+pub fn nivelar(x: &[f32], sr: f32) -> Vec<f32> {
+    let at_env = 1.0 - (-1.0 / (0.004 * sr)).exp();
+    let rel_env = 1.0 - (-1.0 / (0.25 * sr)).exp();
+    let at_agc = 1.0 - (-1.0 / (0.01 * sr)).exp();
+    let rel_agc = 1.0 - (-1.0 / (0.4 * sr)).exp();
+    let (mut env, mut agc) = (0.0f32, 1.0f32);
+    x.iter()
+        .map(|&v| {
+            let a = v.abs();
+            env += (a - env) * if a > env { at_env } else { rel_env };
+            let deseo = if env > 0.004 { (0.42 / env).clamp(1.0, 8.0) } else { 1.0 };
+            agc += (deseo - agc) * if deseo < agc { at_agc } else { rel_agc };
+            let y = v * agc;
+            let b = y.abs();
+            if b < 0.8 { y } else { y.signum() * (0.8 + 0.2 * ((b - 0.8) / 0.2).tanh()) }
+        })
+        .collect()
+}
+
+/// Armonía: la misma voz llevada `k` grados de la escala (2 = tercera, 4 = quinta, -2 = tercera abajo)
+/// o, si `semis` es Some, una cantidad fija de semitonos (±12 = octava). Cada nota cae afinada.
+pub fn armonia(x: &[f32], sr: f32, mask: u16, k: i32, semis: Option<i32>) -> Vec<f32> {
+    let cont = contorno(x, sr);
+    let mut notas = notas_de(&cont);
+    let tp = TuneP { on: true, key: 0, scale: 0, speed: 0.0, mix: 1.0, gain: 1.0, mask, estilo: 0, algoritmo: 0, mezcla: 1.0 };
+    for n in notas.iter_mut() {
+        // nota de la escala más cercana a la cantada, y desde ahí se cuentan los grados
+        let base = nota_objetivo(&tp, n.centro, None);
+        n.objetivo = match semis {
+            Some(s) => (base + s) as f32,
+            None => grados(&tp, base, k) as f32,
+        };
+    }
+    retune(x, sr, &cont, &notas, 0.6)
 }
