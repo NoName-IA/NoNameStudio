@@ -92,6 +92,7 @@ impl StudioApp {
         };
         match which {
             "trap" => self.new_from_template(1),
+            "neblina" => self.new_from_template(7),
             "house" => self.new_from_template(4),
             "browser" => {
                 self.left_tab = 1;
@@ -130,6 +131,11 @@ impl StudioApp {
                 return;
             }
             "settings" => {
+                self.open_win(Win::Settings);
+                return;
+            }
+            "teclas" => {
+                self.ajuste_sec = 8;
                 self.open_win(Win::Settings);
                 return;
             }
@@ -321,19 +327,23 @@ impl StudioApp {
             }
             let mut open = true;
             let pantalla = ctx.content_rect();
+            let id_ventana = egui::Id::new(("plugin", format!("{w:?}")));
             let mut ventana = egui::Window::new(RichText::new(self.win_title(w)).strong())
-                .id(egui::Id::new(("plugin", format!("{w:?}"))))
+                .id(id_ventana)
                 .open(&mut open)
                 .resizable(false)
                 .collapsible(true)
                 .default_pos(Pos2::new(120.0 + i as f32 * 30.0, 110.0 + i as f32 * 30.0))
                 .frame(Frame::window(&ctx.global_style()).fill(Color32::from_gray(25)));
             if w == Win::Settings || self.plat.mobile {
-                // como un cuadro de diálogo: al centro de la pantalla y, si no entra, se desliza
+                // como un cuadro de diálogo: aparece al centro y, si no entra, se desliza;
+                // se puede arrastrar desde la barra de título (también en el teléfono)
                 ventana = ventana
-                    .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+                    .pivot(Align2::CENTER_CENTER)
+                    .current_pos(pos_dialogo(ctx, id_ventana))
                     .collapsible(false)
-                    .vscroll(true)
+                    // Ajustes desliza solo su contenido: secciones y barra de abajo quedan fijas
+                    .vscroll(w != Win::Settings)
                     .max_height((pantalla.height() - 50.0).max(200.0))
                     .max_width((pantalla.width() - 30.0).max(300.0));
             }

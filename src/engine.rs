@@ -835,7 +835,7 @@ impl Engine {
         let sr = self.sr;
         let c = &self.proj.channels[t.ci];
         match c.inst {
-            Inst::Kick | Inst::Snare | Inst::Clap | Inst::Rim | Inst::Hat | Inst::OHat => {
+            Inst::Kick | Inst::Snare | Inst::Clap | Inst::Rim | Inst::Hat | Inst::OHat | Inst::Tom | Inst::Conga | Inst::Cowbell | Inst::Clave | Inst::Snap | Inst::Shaker | Inst::Ride | Inst::Crash => {
                 self.voices.push(Voice::new(t.ci, c.inst, t.delay, t.v, 60.0, 0.0, c.tune, c.decay, t.seed, sr));
             }
             Inst::Rhodes | Inst::Pad | Inst::Bass | Inst::Bell => {

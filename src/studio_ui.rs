@@ -94,6 +94,12 @@ pub(super) struct Settings {
     pub zoom: f32,
     /// mostrar textos de ayuda
     pub ayudas: bool,
+    /// el tamaño del teléfono ya se pasó a la escala nueva (Normal = el antiguo Muy grande)
+    #[serde(default)]
+    pub zoom_movil_v2: bool,
+    /// atajos de teclado cambiados (id de la acción → «Ctrl+S»; vacío = sin tecla)
+    #[serde(default)]
+    pub teclas: std::collections::BTreeMap<String, String>,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -143,6 +149,8 @@ impl Default for Settings {
             normalizar: 0,
             zoom: 1.0,
             ayudas: true,
+            zoom_movil_v2: false,
+            teclas: Default::default(),
         }
     }
 }
@@ -624,7 +632,7 @@ impl StudioApp {
         });
         let ancho = (pantalla.width() - 40.0).min(620.0).max(200.0);
         let alto = (pantalla.height() - 40.0).min(560.0);
-        egui::Area::new(egui::Id::new("sel_audio")).order(egui::Order::Tooltip).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+        egui::Area::new(egui::Id::new("sel_audio")).order(egui::Order::Tooltip).pivot(Align2::CENTER_CENTER).current_pos(super::pos_dialogo(ctx, egui::Id::new("sel_audio"))).movable(true).show(ctx, |ui| {
             Frame::new().fill(PANEL).stroke(Stroke::new(1.0, LINE)).corner_radius(16).inner_margin(Margin::same(14)).show(ui, |ui| {
                 ui.set_width(ancho);
                 ui.set_height(alto);
@@ -679,8 +687,12 @@ impl StudioApp {
             });
         });
         if let Some(p) = elegido {
-            let t = self.free_track(self.play_from, 16);
-            self.import_to_playlist(&p, t, self.play_from);
+            if self.elegir_al_rack {
+                self.import_to_rack(&p);
+            } else {
+                let t = self.free_track(self.play_from, 16);
+                self.import_to_playlist(&p, t, self.play_from);
+            }
             cerrar = true;
         }
         if let Some(d) = ir {
@@ -690,6 +702,7 @@ impl StudioApp {
         if cerrar {
             self.elegir_audio = None;
             self.elegir_cache = None;
+            self.elegir_al_rack = false;
         }
     }
 
@@ -962,7 +975,7 @@ impl StudioApp {
             }
             if self.settings.ayudas {
                 if !self.plat.mobile {
-                    ui.label(RichText::new("Clic: patrón · arrastrar: mover · borde: largo · clic derecho: menú · regla: tocar / arrastrar: bucle").small().color(DIM));
+                    ui.label(RichText::new("Clic: patrón · arrastrar clip: mover · arrastrar fondo o rueda apretada: mover la vista · borde: largo · clic derecho: menú · regla: bucle").small().color(DIM));
                 }
             }
         });
@@ -983,7 +996,17 @@ impl StudioApp {
             if !clip.intersects(hr) {
                 continue;
             }
-            let fondo = ui.interact(hr, ui.id().with(("pista_cab", t)), Sense::click());
+            let fondo = ui.interact(hr, ui.id().with(("pista_cab", t)), Sense::click_and_drag());
+            if fondo.dragged() {
+                // arrastrar la columna de pistas sube y baja la playlist (ahí nunca hay clips)
+                let dt = ui.input(|i| i.stable_dt).clamp(0.004, 0.05);
+                let dy = fondo.drag_delta().y;
+                let actual = ui.clip_rect().min - rect.min;
+                self.pl_mover = Some(Vec2::new(actual.x, actual.y - dy));
+                self.pl_vel = self.pl_vel * 0.5 + Vec2::new(0.0, dy / dt) * 0.5;
+                self.pl_manual = ui.input(|i| i.time);
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            }
             let pista = self.p.pista(t);
             let suena = !(pista.mute || (solo_alguna && !pista.solo));
             if !suena {
@@ -1152,9 +1175,26 @@ impl StudioApp {
         // clips de patrón
         let pat_rect = |cl: &Clip, p: &Pattern| Rect::from_min_size(Pos2::new(org.x + cl.bar as f32 * bw + 1.0, org.y + cl.track as f32 * TH + 2.0), Vec2::new(p.bars as f32 * bw - 2.0, TH - 4.0));
         let step_rect = |track: u32, start: u32, len: u32| Rect::from_min_size(Pos2::new(org.x + start as f32 * spx + 1.0, org.y + track as f32 * TH + 2.0), Vec2::new((len as f32 * spx - 2.0).max(4.0), TH - 4.0));
-        for cl in &self.p.playlist {
+        // posición animada de un clip: se desliza en 0,12 s hacia su lugar (relativa al lienzo, así
+        // desplazar la vista no la anima)
+        let ctx_a = ui.ctx().clone();
+        // si el zoom cambió hace muy poco, los clips siguen al instante (animarlos los dejaba desfasados)
+        let id_zoom = egui::Id::new("pl_zoom_prev");
+        let (bw_prev, t_zoom): (f32, f64) = ui.ctx().data(|d| d.get_temp(id_zoom)).unwrap_or((bw, -10.0));
+        let ahora_z = ui.input(|i| i.time);
+        let t_zoom = if (bw_prev - bw).abs() > 1e-3 { ahora_z } else { t_zoom };
+        ui.ctx().data_mut(|d| d.insert_temp(id_zoom, (bw, t_zoom)));
+        let anim = if ahora_z - t_zoom < 0.25 { 0.0 } else { 0.12 };
+        let suave = |clave: egui::Id, r: Rect| -> Rect {
+            let rel = r.min - org;
+            let x = ctx_a.animate_value_with_time(clave.with("x"), rel.x, anim);
+            let y = ctx_a.animate_value_with_time(clave.with("y"), rel.y, anim);
+            let w = ctx_a.animate_value_with_time(clave.with("w"), r.width(), anim);
+            Rect::from_min_size(org + Vec2::new(x, y), Vec2::new(w, r.height()))
+        };
+        for (ci, cl) in self.p.playlist.iter().enumerate() {
             let Some(p) = self.p.pattern(cl.pat) else { continue };
-            let r = pat_rect(cl, p);
+            let r = suave(egui::Id::new(("clip_pat", ci)), pat_rect(cl, p));
             let c = c32(p.color);
             painter.rect_filled(r, 5, lerp_col(c, BG, 0.5));
             let banda = Rect::from_min_size(r.min, Vec2::new(r.width(), 16.0));
@@ -1166,7 +1206,7 @@ impl StudioApp {
         // clips de audio
         let ss = self.p.step_secs() as f32;
         for cl in &self.p.audio_clips {
-            let r = step_rect(cl.track, cl.start, cl.len);
+            let r = suave(egui::Id::new(("clip_audio", cl.id)), step_rect(cl.track, cl.start, cl.len));
             let chn = self.p.channel(cl.ch);
             // como en BandLab: cuerpo azul, banda con el nombre y onda celeste llena
             let cuerpo = Color32::from_rgb(30, 86, 172);
@@ -1245,7 +1285,7 @@ impl StudioApp {
         }
         // automatización
         for a in &self.p.autos {
-            let r = step_rect(a.track, a.start, a.len);
+            let r = suave(egui::Id::new(("clip_auto", a.id)), step_rect(a.track, a.start, a.len));
             painter.rect(r, 4, Color32::from_gray(41), Stroke::new(1.0, Color32::from_rgb(130, 110, 190)), StrokeKind::Inside);
             let inner = r.shrink2(Vec2::new(2.0, 4.0));
             let mut pts = vec![];
@@ -1263,13 +1303,40 @@ impl StudioApp {
             let x = org.x + (self.status.pos() / 16.0) as f32 * bw;
             painter.vline(x, (rect.top() + 4.0)..=rect.bottom(), Stroke::new(1.5, Color32::WHITE));
             painter.circle_filled(Pos2::new(x, rect.top() + 4.0), 4.0, Color32::WHITE);
+            // la vista sigue a la canción como una cinta: cuando el cabezal pasa el tercio de lo visible,
+            // se queda ahí y la playlist corre debajo un poquito en cada cuadro (sin saltos, suave también
+            // en el teléfono). Si el cabezal queda fuera de la vista (por ejemplo al volver al inicio de un
+            // bucle), se lleva a su lugar de una vez. No se mueve mientras arrastras algo en la playlist.
+            let vista = ui.clip_rect();
+            let izq = vista.left() + tn;
+            let ancho_util = (vista.right() - izq).max(50.0);
+            let punto = izq + ancho_util / 3.0;
+            let movida_a_mano = ui.input(|i| i.time) - self.pl_manual < 2.5;
+            let tocando = resp.dragged() || ui.input(|i| i.pointer.any_down()) || movida_a_mano || self.pl_vel != Vec2::ZERO;
+            if !tocando && (x > punto || x < izq) {
+                // desplazamiento horizontal (desde el borde izquierdo del lienzo) que deja el cabezal en el tercio
+                self.pl_seguir = Some((x - rect.left()) - tn - ancho_util / 3.0);
+                ui.ctx().request_repaint();
+            }
         }
         // zoom con Ctrl + rueda del ratón
-        if resp.hovered() {
-            // egui convierte Ctrl + rueda en un factor de zoom
+        if resp.hovered() || ui.input(|i| i.multi_touch()).is_some_and(|m| rect.contains(m.center_pos)) {
+            // egui convierte Ctrl + rueda (y el pellizco con dos dedos) en un factor de zoom
             let z = ui.input(|i| i.zoom_delta());
             if (z - 1.0).abs() > 1e-3 {
+                let antes = self.pl_bw;
                 self.pl_bw = (self.pl_bw * z).clamp(16.0, 240.0);
+                let z_real = self.pl_bw / antes;
+                // lo que está entre los dedos (o bajo el cursor) se queda en su lugar de la pantalla
+                let centro = ui.input(|i| i.multi_touch().map(|m| m.center_pos).or(i.pointer.hover_pos()));
+                if let Some(c) = centro {
+                    let actual = ui.clip_rect().min - rect.min;
+                    let dx = (c.x - org.x) * (z_real - 1.0);
+                    let base = self.pl_mover.unwrap_or(actual);
+                    self.pl_mover = Some(Vec2::new((base.x + dx).max(0.0), base.y));
+                }
+                self.pl_manual = ui.input(|i| i.time);
+                ui.ctx().request_repaint();
             }
         }
 
@@ -1310,11 +1377,82 @@ impl StudioApp {
                 }
             }
         }
-        if resp.drag_started() {
+        // ---------- teléfono: un dedo arrastra la vista; mantener apretado levanta el clip ----------
+        let movil = self.plat.mobile;
+        let ahora_g = ui.input(|i| i.time);
+        if movil {
+            let abajo = ui.input(|i| i.pointer.primary_down());
+            if self.pl_toque.is_none() && resp.is_pointer_button_down_on() {
+                if let (Some(p0), Some(t0)) = ui.input(|i| (i.pointer.press_origin(), i.pointer.press_start_time())) {
+                    if p0.y >= org.y && p0.x >= org.x {
+                        let sobre = hit(self, p0).map(|(k, i, _)| (k, i, self.id_de_clip(k, i)));
+                        let (st, tr) = self.pl_cell(p0);
+                        self.pl_toque = Some(Toque { inicio: t0, pos0: p0, sobre, track: tr, step: st, movido: false, levantado: false, arrastrado: false });
+                    }
+                }
+            }
+            let mut levantar_ahora = false;
+            if let Some(t) = &mut self.pl_toque {
+                if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                    if !t.levantado && (p - t.pos0).length() > clips_view::MOVER_PX {
+                        t.movido = true;
+                    }
+                }
+                if abajo && !t.movido && !t.levantado {
+                    if ahora_g - t.inicio >= clips_view::LEVANTAR_S {
+                        t.levantado = true;
+                        levantar_ahora = true;
+                    } else {
+                        ui.ctx().request_repaint_after(Duration::from_millis(30));
+                    }
+                }
+            }
+            if levantar_ahora {
+                #[cfg(target_os = "android")]
+                audio::vibrar();
+                self.pl_barra = None;
+                ui.ctx().request_repaint();
+            }
+        }
+        let levantado_clip = movil && self.pl_toque.as_ref().is_some_and(|t| t.levantado && t.sobre.is_some());
+        let toque_largo = movil && self.pl_toque.as_ref().is_some_and(|t| t.levantado);
+        // dos dedos (teléfono): solo zoom con el pellizco. Si el primer dedo ya había empezado a mover
+        // un clip, ese movimiento se deshace.
+        let dos_dedos = ui.input(|i| i.multi_touch()).filter(|m| m.num_touches >= 2 && ui.clip_rect().contains(m.center_pos));
+        if dos_dedos.is_some() && self.pl_drag.is_some() {
+            self.pl_drag = None;
+            self.undo();
+        }
+        // tecla de mover la vista (Espacio) apretada: arrastrar mueve la vista en vez de editar
+        let mano_abajo = self.mano.is_some() && self.atajo("mano").is_some_and(|a| ui.input(|i| a.abajo(i)));
+        if mano_abajo && resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        }
+        // tiempo apretando en la regla sin mover: a los 0,35 s se marca el bucle al arrastrar
+        let ahora_t = ui.input(|i| i.time);
+        let en_regla_desde = ui.input(|i| i.pointer.press_origin().filter(|p| p.y < org.y && rect.contains(*p)).and(i.pointer.press_start_time()));
+        let mantenido_regla = en_regla_desde.is_some_and(|t0| ahora_t - t0 >= 0.35);
+        if resp.drag_started() && dos_dedos.is_none() {
             if let Some(pos) = ui.input(|i| i.pointer.press_origin()) {
                 let (s, t) = self.pl_cell(pos);
                 let raw_step = (((pos.x - org.x) / spx).max(0.0)) as i32;
-                if pos.y < org.y {
+                if mano_abajo {
+                    self.pl_paneo = true;
+                    self.pl_paneo_h = false;
+                    self.pl_vel = Vec2::ZERO;
+                    self.mano = Some(true);
+                } else if pos.y < org.y && !mantenido_regla {
+                    // regla: arrastrar mueve de lado
+                    self.pl_paneo = true;
+                    self.pl_paneo_h = true;
+                    self.pl_vel = Vec2::ZERO;
+                } else if movil && pos.y >= org.y && !levantado_clip {
+                    // teléfono: arrastrar con un dedo mueve la vista (también encima de clips)
+                    self.pl_paneo = true;
+                    self.pl_paneo_h = false;
+                    self.pl_vel = Vec2::ZERO;
+                } else if pos.y < org.y {
+                    // regla mantenida y luego arrastrada: marca el bucle
                     let a = (s / 16).min(999);
                     self.snap();
                     self.p.loop_a = a;
@@ -1322,7 +1460,11 @@ impl StudioApp {
                     self.pl_drag = Some(PlDrag::Loop { a });
                 } else if let Some((k, i, r)) = hit(self, pos) {
                     self.snap();
-                    let edge = 7.0f32.min(r.width() / 3.0);
+                    if let Some(t) = &mut self.pl_toque {
+                        t.arrastrado = true;
+                    }
+                    // en el teléfono el borde para alargar es más ancho (el dedo es más grueso)
+                    let edge = if movil { 18.0f32.min(r.width() / 3.0) } else { 7.0f32.min(r.width() / 3.0) };
                     match k {
                         Kind::Pat => {
                             let b = ((pos.x - org.x) / bw).floor() as i32;
@@ -1343,6 +1485,70 @@ impl StudioApp {
                             self.pl_drag = Some(if pos.x > r.right() - edge { PlDrag::Right { kind: k, id: c.id } } else { PlDrag::Move { kind: k, id: c.id, s0: raw_step, tr0: t as i32, start: c.start, track: c.track, moved: false } });
                         }
                     }
+                } else if pos.x > ui.clip_rect().left() + tn {
+                    // fondo vacío: arrastrar mueve la vista (de lado y de arriba abajo a la vez)
+                    self.pl_paneo = true;
+                    self.pl_paneo_h = false;
+                    self.pl_vel = Vec2::ZERO;
+                }
+            }
+        }
+        // ---------- mover la vista: arrastrar el fondo, botón del medio y la inercia al soltar ----------
+        {
+            let ahora = ui.input(|i| i.time);
+            let dt = ui.input(|i| i.stable_dt).clamp(0.004, 0.05);
+            let vista = ui.clip_rect();
+            let actual = vista.min - rect.min;
+            let medio = ui.input(|i| i.pointer.middle_down()) && ui.rect_contains_pointer(vista);
+            if ui.input(|i| i.pointer.any_pressed()) {
+                // tocar frena la inercia
+                self.pl_vel = Vec2::ZERO;
+            }
+            if dos_dedos.is_some() {
+                // dos dedos = solo zoom (pellizco): la vista no se arrastra mientras tanto
+                self.pl_vel = Vec2::ZERO;
+            }
+            let arrastre = if dos_dedos.is_some() {
+                None
+            } else if self.pl_paneo && resp.dragged() {
+                let d = resp.drag_delta();
+                Some(if self.pl_paneo_h { Vec2::new(d.x, 0.0) } else { d })
+            } else if medio {
+                Some(ui.input(|i| i.pointer.delta()))
+            } else {
+                None
+            };
+            if let Some(d) = arrastre {
+                self.pl_mover = Some(actual - d);
+                // velocidad suavizada (para que al soltar siga con el mismo impulso)
+                self.pl_vel = self.pl_vel * 0.5 + (d / dt) * 0.5;
+                self.pl_manual = ahora;
+                ui.ctx().request_repaint();
+            } else if self.pl_paneo || !ui.input(|i| i.pointer.any_down()) {
+                self.pl_paneo = self.pl_paneo && resp.dragged();
+                if self.pl_vel.length() > 30.0 {
+                    // inercia: sigue deslizando y frena suave
+                    self.pl_mover = Some(actual - self.pl_vel * dt);
+                    self.pl_vel *= 0.92f32.powf(dt * 60.0);
+                    self.pl_manual = ahora;
+                    ui.ctx().request_repaint();
+                } else {
+                    self.pl_vel = Vec2::ZERO;
+                }
+            }
+            if self.pl_paneo || medio {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            }
+            // apretando la regla sin mover: aviso de que ya se puede marcar el bucle
+            if resp.is_pointer_button_down_on() && !resp.dragged() && en_regla_desde.is_some() {
+                if mantenido_regla {
+                    if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                        let x0 = org.x + ((p.x - org.x) / bw).floor().max(0.0) * bw;
+                        painter.rect_filled(Rect::from_min_max(Pos2::new(x0, rect.top() + 2.0), Pos2::new(x0 + bw, rect.top() + rul - 2.0)), 3, ACCENT.gamma_multiply(0.6));
+                        painter.text(Pos2::new(x0 + bw + 6.0, rect.top() + rul * 0.5), Align2::LEFT_CENTER, "arrastra para marcar el bucle", FontId::proportional(11.0), ACCENT);
+                    }
+                } else {
+                    ui.ctx().request_repaint();
                 }
             }
         }
@@ -1436,6 +1642,25 @@ impl StudioApp {
                     self.cmd(Cmd::Project(Box::new(self.p.clone())));
                 }
             }
+            // clip arrastrado cerca del borde: la vista se desplaza sola hacia ese lado (más rápido cuanto
+            // más cerca del borde), así lo puedes llevar a cualquier parte de la playlist
+            if matches!(self.pl_drag, Some(PlDrag::Pat { .. }) | Some(PlDrag::Move { .. })) {
+                if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                    let vista = ui.clip_rect();
+                    let zona = if self.plat.mobile { 60.0 } else { 40.0 };
+                    let izq = vista.left() + tn;
+                    let empuje = |d: f32| ((zona - d) / zona).clamp(0.0, 1.0);
+                    let vx = empuje(p.x - izq) * -1.0 + empuje(vista.right() - p.x);
+                    let vy = empuje(p.y - (vista.top() + rul)) * -1.0 + empuje(vista.bottom() - p.y);
+                    if vx != 0.0 || vy != 0.0 {
+                        let dt = ui.input(|i| i.stable_dt).clamp(0.004, 0.05);
+                        let actual = vista.min - rect.min;
+                        self.pl_mover = Some(actual + Vec2::new(vx, vy) * 900.0 * dt);
+                        self.pl_manual = ui.input(|i| i.time);
+                        ui.ctx().request_repaint();
+                    }
+                }
+            }
             if resp.drag_stopped() {
                 let d = self.pl_drag.take();
                 let moved = match &d {
@@ -1452,9 +1677,10 @@ impl StudioApp {
                 self.send();
             }
         }
-        if resp.clicked() {
+        if resp.clicked() && !mano_abajo && !toque_largo {
             if let Some(pos) = resp.interact_pointer_pos() {
                 self.pl_menu = None;
+                self.pl_barra = None;
                 if pos.y < org.y {
                     let b = ((pos.x - org.x) / bw).floor().max(0.0) as u32;
                     self.play_from = b * STEPS_PER_BAR;
@@ -1473,6 +1699,19 @@ impl StudioApp {
                             let id = self.p.autos[i].id;
                             self.open_win(Win::Auto(id));
                         }
+                        // un toque en el vacío no pone nada (para eso: doble clic / doble toque)
+                        None => {}
+                    }
+                }
+            }
+        }
+        if resp.double_clicked() && !mano_abajo && !toque_largo {
+            if let Some(pos) = resp.interact_pointer_pos() {
+                if pos.y >= org.y && pos.x >= org.x {
+                    match hit(self, pos) {
+                        // doble clic en un clip: editarlo
+                        Some((k, i, _)) => self.editar_clip(k, i),
+                        // doble clic en el vacío: poner el patrón elegido
                         None => {
                             let b = ((pos.x - org.x) / bw).floor().max(0.0) as u32;
                             let (_, t) = self.pl_cell(pos);
@@ -1486,7 +1725,35 @@ impl StudioApp {
                 }
             }
         }
-        if resp.secondary_clicked() {
+        // teléfono: al soltar un toque largo sin arrastrar, aparece la barrita de acciones
+        if movil && !ui.input(|i| i.pointer.primary_down()) {
+            if let Some(t) = self.pl_toque.take() {
+                if t.levantado && !t.arrastrado {
+                    // la barrita sale ahí mismo, a la derecha del dedo
+                    let ancla = t.pos0 + Vec2::new(18.0, 0.0);
+                    if t.sobre.is_some() || self.pl_copia.is_some() || !self.p.patterns.is_empty() {
+                        self.pl_barra = Some(Barra { clip: t.sobre, ancla, track: t.track, step: t.step, cuadros: 0 });
+                    }
+                }
+            }
+        }
+        // clip levantado o con la barrita abierta: se resalta (un poco más grande, borde blanco y sombra)
+        let resaltado = self.pl_barra.as_ref().and_then(|b| b.clip).or_else(|| self.pl_toque.as_ref().filter(|t| t.levantado).and_then(|t| t.sobre));
+        let t_lev = ui.ctx().animate_bool_with_time(egui::Id::new("clip_levantado"), resaltado.is_some(), 0.14);
+        if let Some((k, i, _)) = resaltado {
+            if let Some((tr, s, l)) = self.lugar_de_clip(k, i) {
+                let clave = match k {
+                    Kind::Pat => egui::Id::new(("clip_pat", i)),
+                    Kind::Audio => egui::Id::new(("clip_audio", self.id_de_clip(k, i))),
+                    Kind::Auto => egui::Id::new(("clip_auto", self.id_de_clip(k, i))),
+                };
+                let r = suave(clave, step_rect(tr, s, l)).expand(3.0 * t_lev);
+                painter.rect_filled(r.translate(Vec2::new(0.0, 6.0 * t_lev)), 7, Color32::from_black_alpha((120.0 * t_lev) as u8));
+                painter.rect_filled(r, 7, Color32::from_white_alpha((30.0 * t_lev) as u8));
+                painter.rect_stroke(r, 7, Stroke::new(2.0, Color32::from_white_alpha((255.0 * t_lev) as u8)), StrokeKind::Outside);
+            }
+        }
+        if resp.secondary_clicked() && !movil {
             if let Some(pos) = resp.interact_pointer_pos() {
                 if let Some((k, i, _)) = hit(self, pos) {
                     let id = match k {
@@ -1502,6 +1769,24 @@ impl StudioApp {
                     self.send();
                 }
             }
+        }
+        // cualquier desplazamiento pedido (seguimiento, arrastre, inercia, zoom, borde) se limita a lo que
+        // de verdad se puede desplazar: si la canción entera cabe, no se corre nada (si no, la vista
+        // quedaba corrida y con huecos al alejar el zoom)
+        let maximo = (rect.size() - ui.clip_rect().size()).max(Vec2::ZERO);
+        if let Some(o) = &mut self.pl_mover {
+            *o = o.clamp(Vec2::ZERO, maximo);
+        }
+        if let Some(x) = &mut self.pl_seguir {
+            *x = x.clamp(0.0, maximo.x);
+            // ya está ahí: no hace falta pedirlo
+            let actual = ui.clip_rect().left() - rect.left();
+            if (*x - actual).abs() < 0.5 {
+                self.pl_seguir = None;
+            }
+        }
+        if maximo.x <= 0.0 && maximo.y <= 0.0 {
+            self.pl_vel = Vec2::ZERO;
         }
     }
 
@@ -1525,6 +1810,10 @@ impl StudioApp {
         let area = egui::Area::new(egui::Id::new("plmenu")).fixed_pos(pos).order(egui::Order::Foreground).show(ctx, |ui| desplazable(ui, |ui| {
             Frame::menu(ui.style()).show(ui, |ui| {
                 ui.set_min_width(190.0);
+                if self.menu_portapapeles(ui, kind, idx, step) {
+                    close = true;
+                    return;
+                }
                 match kind {
                     Kind::Pat => {
                         if ui.button("Editar patrón").clicked() {
@@ -1897,7 +2186,7 @@ impl StudioApp {
         self.msg = "Silencio recortado.".into();
     }
 
-    fn split_clip(&mut self, id: u32, step: u32) {
+    pub(super) fn split_clip(&mut self, id: u32, step: u32) {
         let Some(c) = self.p.audio_clip(id).cloned() else { return };
         if step <= c.start || step >= c.start + c.len {
             return;
@@ -3082,26 +3371,37 @@ impl StudioApp {
 
     pub(super) fn settings_window(&mut self, ui: &mut Ui) {
         let antes = format!("{:?}", self.settings);
-        let secciones = ["General", "Audio", "Grabación", "MIDI", "Exportar", "Pantalla", "Plugins", "Metrónomo"];
+        let secciones = ["General", "Audio", "Grabación", "MIDI", "Exportar", "Pantalla", "Plugins", "Metrónomo", "Teclas"];
         let mut reiniciar_audio = false;
+        // alto del contenido: lo que entra en la pantalla (la columna y la barra de abajo no se mueven)
+        let alto = (ui.ctx().content_rect().height() - 150.0).clamp(220.0, 520.0);
+        // columna de secciones más angosta en el teléfono; el contenido usa lo que quede (hasta 440)
+        let col = if self.plat.mobile { 112.0 } else { 130.0 };
+        let ancho = (ui.ctx().content_rect().width() - col - 70.0).clamp(240.0, 440.0);
         ui.horizontal_top(|ui| {
-            // columna de secciones
+            // columna de secciones (fija)
             ui.vertical(|ui| {
-                ui.set_width(130.0);
+                ui.set_width(col);
+                ui.spacing_mut().item_spacing.y = 6.0;
                 for (i, n) in secciones.iter().enumerate() {
                     #[cfg(not(windows))]
                     if *n == "Plugins" {
                         continue;
                     }
-                    if ui.add(egui::Button::selectable(self.ajuste_sec == i, RichText::new(*n).size(13.5)).min_size(Vec2::new(126.0, 30.0))).clicked() {
+                    // las teclas son para la PC (en el teléfono se usan los gestos)
+                    if *n == "Teclas" && self.plat.mobile {
+                        continue;
+                    }
+                    if pestana_metal(ui, self.ajuste_sec == i, n, col - 4.0).clicked() {
                         self.ajuste_sec = i;
                     }
                 }
             });
             ui.add_space(10.0);
-            ui.vertical(|ui| {
-                ui.set_width(420.0);
-                ui.set_min_height(380.0);
+            // el contenido de la sección es lo único que se desliza
+            ui.vertical(|ui| egui::ScrollArea::vertical().id_salt(("ajustes_contenido", self.ajuste_sec)).max_height(alto).max_width(ancho).auto_shrink([false, false]).show(ui, |ui| {
+                ui.set_width(ancho - 12.0);
+                ui.set_min_height(alto);
                 let titulo = |ui: &mut Ui, t: &str| {
                     ui.label(RichText::new(t).strong().size(15.0).color(ACCENT2));
                     ui.add_space(4.0);
@@ -3332,6 +3632,10 @@ impl StudioApp {
                         titulo(ui, "Ayudas");
                         ui.checkbox(&mut self.settings.ayudas, "Mostrar textos de ayuda junto a las herramientas");
                     }
+                    8 => {
+                        titulo(ui, "Teclas y atajos");
+                        self.ajustes_teclas(ui);
+                    }
                     _ => {
                         #[cfg(windows)]
                         {
@@ -3360,11 +3664,13 @@ impl StudioApp {
                         }
                     }
                 }
-            });
+            }));
         });
+        // barra de abajo (fija)
+        ui.add_space(4.0);
         ui.separator();
         ui.horizontal(|ui| {
-            if ui.button("Restablecer todo").on_hover_text("Vuelve a los valores de fábrica").clicked() {
+            if pestana_metal(ui, false, "Restablecer todo", 140.0).on_hover_text("Vuelve a los valores de fábrica").clicked() {
                 let fav = std::mem::take(&mut self.settings.fav_dirs);
                 let plug = std::mem::take(&mut self.settings.plugin_dirs);
                 let tut = self.settings.tutorial_done;
@@ -3384,6 +3690,10 @@ impl StudioApp {
 
     /// Vuelve a abrir la salida de audio con los ajustes actuales y le reenvía todo al motor.
     pub(super) fn reiniciar_audio(&mut self) {
+        // si estaba sonando, después de reconectar sigue desde donde iba (el motor nuevo empieza parado)
+        let seguia = self.playing();
+        let desde = self.status.pos().max(0.0) as u32;
+        self.status.playing.store(false, Ordering::Relaxed);
         self.audio = None;
         let abierto = match audio::start(self.p.clone(), self.status.clone(), &self.settings.salida, self.settings.buffer) {
             Ok(a) => {
@@ -3412,6 +3722,9 @@ impl StudioApp {
                 }
                 self.cmd(Cmd::Metronome(self.metro));
                 self.plugins_reload_all();
+                if seguia {
+                    self.play(if self.song_mode { desde } else { 0 });
+                }
             }
             Err(e) => self.audio_err = Some(e),
         }

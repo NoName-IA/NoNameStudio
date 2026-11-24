@@ -89,6 +89,7 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
         external
     };
     audio::ACTIVIDAD.store(app.activity_as_ptr(), std::sync::atomic::Ordering::Relaxed);
+    let _ = audio::APP_ANDROID.set(app.clone());
     // ¿se abrió tocando un archivo .nns? Se copia a la carpeta de proyectos y se abre desde ahí
     let archivo = archivo_del_intent(&export_dir);
     let options = eframe::NativeOptions { android_app: Some(app), renderer: eframe::Renderer::Glow, ..Default::default() };

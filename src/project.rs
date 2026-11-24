@@ -26,16 +26,33 @@ pub enum Inst {
     Audio,
     /// Instrumento externo (plugin CLAP)
     Plugin,
+    // percusión agregada después (van al final para no cambiar los proyectos guardados)
+    Tom,
+    Conga,
+    Cowbell,
+    Clave,
+    Snap,
+    Shaker,
+    Ride,
+    Crash,
 }
 
 impl Inst {
-    pub const ALL: [Inst; 14] = [
+    pub const ALL: [Inst; 22] = [
         Inst::Kick,
         Inst::Snare,
         Inst::Clap,
         Inst::Rim,
         Inst::Hat,
         Inst::OHat,
+        Inst::Tom,
+        Inst::Conga,
+        Inst::Cowbell,
+        Inst::Clave,
+        Inst::Snap,
+        Inst::Shaker,
+        Inst::Ride,
+        Inst::Crash,
         Inst::Rhodes,
         Inst::Pad,
         Inst::Bass,
@@ -46,7 +63,10 @@ impl Inst {
         Inst::Audio,
     ];
     pub fn is_drum(self) -> bool {
-        matches!(self, Inst::Kick | Inst::Snare | Inst::Clap | Inst::Rim | Inst::Hat | Inst::OHat)
+        matches!(
+            self,
+            Inst::Kick | Inst::Snare | Inst::Clap | Inst::Rim | Inst::Hat | Inst::OHat | Inst::Tom | Inst::Conga | Inst::Cowbell | Inst::Clave | Inst::Snap | Inst::Shaker | Inst::Ride | Inst::Crash
+        )
     }
     pub fn name(self) -> &'static str {
         match self {
@@ -65,6 +85,14 @@ impl Inst {
             Inst::Sampler => "NN Sampler",
             Inst::Audio => "Pista de audio",
             Inst::Plugin => "Plugin",
+            Inst::Tom => "Tom",
+            Inst::Conga => "Conga",
+            Inst::Cowbell => "Cowbell",
+            Inst::Clave => "Clave",
+            Inst::Snap => "Snap",
+            Inst::Shaker => "Shaker",
+            Inst::Ride => "Ride",
+            Inst::Crash => "Crash",
         }
     }
     /// Canales que se escriben con el piano roll.

@@ -102,9 +102,11 @@ pub fn start(proj: Project, status: Arc<Status>, salida: &str, buffer: u32) -> R
     engine.set_trash(ttx);
     let mut filler = Filler { engine, rx, scratch: vec![0.0; 8192] };
     let caido = status.clone();
-    let err = move |e| {
+    let err = move |e: cpal::Error| {
         eprintln!("audio: {e}");
-        caido.audio_caido.store(true, std::sync::atomic::Ordering::Relaxed);
+        if es_grave(&e) {
+            caido.audio_caido.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     };
 
     let stream = match fmt {
@@ -175,9 +177,11 @@ pub fn record(status: Arc<Status>, entrada: &str, guardar: bool, canal: usize) -
         q.clear();
     }
     let caido = status.clone();
-    let err = move |e| {
+    let err = move |e: cpal::Error| {
         eprintln!("micrófono: {e}");
-        caido.mic_caido.store(true, std::sync::atomic::Ordering::Relaxed);
+        if es_grave(&e) {
+            caido.mic_caido.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     };
     let push = {
         let buf = buf.clone();
@@ -228,6 +232,69 @@ pub fn record(status: Arc<Status>, entrada: &str, guardar: bool, canal: usize) -
 #[cfg(target_os = "android")]
 pub fn request_mic() -> bool {
     request_perm("android.permission.RECORD_AUDIO")
+}
+
+/// ¿El error del audio obliga a reconectar? Los microcortes (el equipo no alcanzó a calcular a tiempo),
+/// el cambio de salida que el sistema ya resolvió solo (p. ej. conectar audífonos) y el aviso de
+/// prioridad no cortan el audio: reconectar por eso paraba la canción y la mandaba al inicio.
+fn es_grave(e: &cpal::Error) -> bool {
+    use cpal::ErrorKind as K;
+    !matches!(e.kind(), K::Xrun | K::DeviceChanged | K::RealtimeDenied)
+}
+
+/// La app de Android (para cambiar las banderas de la ventana, como «pantalla siempre encendida»).
+#[cfg(target_os = "android")]
+pub static APP_ANDROID: std::sync::OnceLock<winit::platform::android::activity::AndroidApp> = std::sync::OnceLock::new();
+
+/// Mantiene la pantalla encendida (mientras suena o graba) o la deja apagarse sola otra vez.
+/// Si la pantalla se apaga, Android pausa la app y la canción se corta.
+///
+/// Se hace en el hilo principal de Java (el dueño de la ventana) con `getWindow().addFlags/clearFlags`.
+/// No se usa `AndroidApp::set_window_flags`: toma un bloqueo de escritura que choca con el que el
+/// bucle de eventos tiene tomado mientras se dibuja, y la interfaz se congelaba («no responde»).
+#[cfg(target_os = "android")]
+pub fn pantalla_encendida(si: bool) {
+    const FLAG_KEEP_SCREEN_ON: i32 = 0x80;
+    let Some(app) = APP_ANDROID.get() else { return };
+    app.run_on_java_main_thread(Box::new(move || {
+        use jni::objects::JValue;
+        let ctx = ndk_context::android_context();
+        let Ok(vm) = (unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }) else { return };
+        let Ok(mut env) = vm.attach_current_thread() else { return };
+        let act = actividad(&ctx);
+        let r = (|| -> jni::errors::Result<()> {
+            let win = env.call_method(&act, "getWindow", "()Landroid/view/Window;", &[])?.l()?;
+            let metodo = if si { "addFlags" } else { "clearFlags" };
+            env.call_method(&win, metodo, "(I)V", &[JValue::Int(FLAG_KEEP_SCREEN_ON)])?;
+            Ok(())
+        })();
+        if r.is_err() {
+            let _ = env.exception_clear();
+        }
+    }));
+}
+
+/// Vibración corta, la misma que usa Android al mantener apretado algo (no necesita permisos).
+#[cfg(target_os = "android")]
+pub fn vibrar() {
+    const LONG_PRESS: i32 = 0;
+    let Some(app) = APP_ANDROID.get() else { return };
+    app.run_on_java_main_thread(Box::new(move || {
+        use jni::objects::JValue;
+        let ctx = ndk_context::android_context();
+        let Ok(vm) = (unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }) else { return };
+        let Ok(mut env) = vm.attach_current_thread() else { return };
+        let act = actividad(&ctx);
+        let r = (|| -> jni::errors::Result<()> {
+            let win = env.call_method(&act, "getWindow", "()Landroid/view/Window;", &[])?.l()?;
+            let vista = env.call_method(&win, "getDecorView", "()Landroid/view/View;", &[])?.l()?;
+            env.call_method(&vista, "performHapticFeedback", "(I)Z", &[JValue::Int(LONG_PRESS)])?;
+            Ok(())
+        })();
+        if r.is_err() {
+            let _ = env.exception_clear();
+        }
+    }));
 }
 
 /// La actividad de Android (se guarda al iniciar; los permisos se piden sobre ella).

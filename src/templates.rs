@@ -478,6 +478,144 @@ fn drill() -> Project {
 /// Aplica un kit de batería (afinación, caída, EQ y compresión) a los canales de percusión.
 pub fn apply_kit(p: &mut Project, kit: usize) {
     for c in p.channels.iter_mut().filter(|c| c.inst.is_drum()) {
+        kit_canal(c, kit);
+    }
+}
+
+/// Un sonido de un kit: (instrumento, nombre, afinación extra, caída extra, volumen).
+pub type SonidoKit = (Inst, &'static str, f32, f32, f32);
+
+/// Sonidos de cada estilo (mismo orden que `KITS`).
+pub fn sonidos_kit(kit: usize) -> &'static [SonidoKit] {
+    const BOOM_BAP: &[SonidoKit] = &[
+        (Inst::Kick, "Kick", 0.0, 1.0, 0.9),
+        (Inst::Snare, "Snare", 0.0, 1.0, 0.8),
+        (Inst::Rim, "Rim", 0.0, 1.0, 0.55),
+        (Inst::Snap, "Snap", 0.0, 1.0, 0.6),
+        (Inst::Hat, "Hi-hat", 0.0, 1.0, 0.5),
+        (Inst::OHat, "Open Hat", 0.0, 1.0, 0.4),
+        (Inst::Shaker, "Shaker", 0.0, 1.0, 0.45),
+        (Inst::Tom, "Tom", -3.0, 1.0, 0.65),
+        (Inst::Ride, "Ride", 0.0, 1.0, 0.35),
+        (Inst::Crash, "Crash", 0.0, 1.0, 0.35),
+    ];
+    const TRAP: &[SonidoKit] = &[
+        (Inst::Kick, "Kick", 0.0, 1.0, 0.9),
+        (Inst::Kick, "808 largo", -5.0, 1.9, 0.8),
+        (Inst::Snare, "Snare", 0.0, 1.0, 0.8),
+        (Inst::Clap, "Clap", 0.0, 1.0, 0.75),
+        (Inst::Snap, "Snap", 0.0, 1.0, 0.6),
+        (Inst::Rim, "Rim", 0.0, 1.0, 0.55),
+        (Inst::Hat, "Hi-hat", 0.0, 1.0, 0.55),
+        (Inst::OHat, "Open Hat", 0.0, 1.0, 0.45),
+        (Inst::Tom, "Tom", 2.0, 0.9, 0.6),
+        (Inst::Crash, "Crash", 0.0, 1.0, 0.35),
+    ];
+    const REGGAETON: &[SonidoKit] = &[
+        (Inst::Kick, "Kick", 0.0, 1.0, 0.9),
+        (Inst::Snare, "Snare", 0.0, 1.0, 0.8),
+        (Inst::Clap, "Clap", 0.0, 1.0, 0.7),
+        (Inst::Rim, "Rim", 0.0, 1.0, 0.6),
+        (Inst::Hat, "Hi-hat", 0.0, 1.0, 0.5),
+        (Inst::OHat, "Open Hat", 0.0, 1.0, 0.4),
+        (Inst::Shaker, "Shaker", 0.0, 1.0, 0.5),
+        (Inst::Tom, "Timbal grave", -4.0, 1.0, 0.7),
+        (Inst::Tom, "Timbal agudo", 5.0, 0.8, 0.65),
+        (Inst::Conga, "Conga", 0.0, 1.0, 0.7),
+        (Inst::Cowbell, "Cowbell", 0.0, 1.0, 0.45),
+        (Inst::Clave, "Clave", 0.0, 1.0, 0.5),
+        (Inst::Crash, "Crash", 0.0, 1.0, 0.35),
+    ];
+    const HOUSE: &[SonidoKit] = &[
+        (Inst::Kick, "Kick", 0.0, 1.0, 0.9),
+        (Inst::Clap, "Clap", 0.0, 1.0, 0.75),
+        (Inst::Snare, "Snare", 0.0, 1.0, 0.7),
+        (Inst::Hat, "Hi-hat", 0.0, 1.0, 0.5),
+        (Inst::OHat, "Open Hat", 0.0, 1.0, 0.45),
+        (Inst::Shaker, "Shaker", 0.0, 1.0, 0.45),
+        (Inst::Ride, "Ride", 0.0, 1.0, 0.4),
+        (Inst::Cowbell, "Cowbell", 0.0, 1.0, 0.4),
+        (Inst::Conga, "Conga", 0.0, 1.0, 0.6),
+        (Inst::Crash, "Crash", 0.0, 1.0, 0.35),
+    ];
+    const LOFI: &[SonidoKit] = &[
+        (Inst::Kick, "Kick", 0.0, 1.0, 0.85),
+        (Inst::Snare, "Snare", 0.0, 1.0, 0.7),
+        (Inst::Rim, "Rim", 0.0, 1.0, 0.5),
+        (Inst::Snap, "Snap", 0.0, 1.0, 0.55),
+        (Inst::Hat, "Hi-hat", 0.0, 1.0, 0.45),
+        (Inst::OHat, "Open Hat", 0.0, 1.0, 0.35),
+        (Inst::Shaker, "Shaker", 0.0, 1.0, 0.4),
+        (Inst::Ride, "Ride", 0.0, 1.0, 0.3),
+    ];
+    const DRILL: &[SonidoKit] = &[
+        (Inst::Kick, "Kick", 0.0, 1.0, 0.9),
+        (Inst::Kick, "808 largo", -6.0, 2.0, 0.8),
+        (Inst::Snare, "Snare", 0.0, 1.0, 0.8),
+        (Inst::Clap, "Clap", 0.0, 1.0, 0.65),
+        (Inst::Rim, "Rim", 0.0, 1.0, 0.55),
+        (Inst::Hat, "Hi-hat", 0.0, 1.0, 0.55),
+        (Inst::OHat, "Open Hat", 0.0, 1.0, 0.4),
+        (Inst::Tom, "Tom", -2.0, 1.0, 0.6),
+        (Inst::Crash, "Crash", 0.0, 1.0, 0.35),
+    ];
+    match kit {
+        0 => BOOM_BAP,
+        1 => TRAP,
+        2 => REGGAETON,
+        3 => HOUSE,
+        4 => LOFI,
+        _ => DRILL,
+    }
+}
+
+/// Deja la batería del proyecto con SOLO los sonidos del estilo `kit`. Los canales que ya tienes y
+/// coinciden (mismo instrumento) se reutilizan, así lo que ya escribiste con ellos sigue sonando; los
+/// golpes que no son del estilo se quitan. Los samples propios (NN Sampler) se quedan.
+pub fn poner_kit(p: &mut Project, kit: usize) {
+    let mut viejos: Vec<Channel> = vec![];
+    let mut otros: Vec<Channel> = vec![];
+    for c in p.channels.drain(..) {
+        if c.inst.is_drum() {
+            viejos.push(c);
+        } else {
+            otros.push(c);
+        }
+    }
+    let mut nuevos: Vec<Channel> = vec![];
+    for &(inst, nombre, tune, decay, vol) in sonidos_kit(kit) {
+        // primero uno con el mismo nombre, si no cualquiera del mismo instrumento
+        let i = viejos.iter().position(|c| c.inst == inst && c.name == nombre).or_else(|| viejos.iter().position(|c| c.inst == inst));
+        let mut c = match i {
+            Some(i) => viejos.remove(i),
+            None => {
+                let id = p.new_id();
+                let mut c = Channel::new(id, inst);
+                c.vol = vol;
+                c
+            }
+        };
+        c.name = nombre.to_string();
+        kit_canal(&mut c, kit);
+        c.tune += tune;
+        c.decay *= decay;
+        nuevos.push(c);
+    }
+    // lo que escribiste con los golpes que no son del estilo se borra con ellos
+    for c in &viejos {
+        for pat in &mut p.patterns {
+            pat.steps.remove(&c.id);
+            pat.notes.remove(&c.id);
+        }
+        p.autos.retain(|a| a.target.channel() != Some(c.id));
+    }
+    nuevos.extend(otros);
+    p.channels = nuevos;
+}
+
+/// Sonido de un canal de batería según el estilo del kit (afinación, caída, EQ y compresión).
+pub fn kit_canal(c: &mut Channel, kit: usize) {
+    {
         let (tune, decay, lo, hi, comp) = match (kit, c.inst) {
             (0, Inst::Kick) => (0.0, 1.0, 2.0, -2.0, true),
             (0, Inst::Snare) => (-1.0, 1.1, 0.0, -1.0, true),

@@ -28,6 +28,11 @@ mod masterizado_view;
 mod pads_view;
 #[path = "efectos_view.rs"]
 mod efectos_view;
+#[path = "teclas.rs"]
+mod teclas;
+#[path = "clips_view.rs"]
+mod clips_view;
+use clips_view::{Barra, ClipCopia, Toque};
 #[path = "retune_view.rs"]
 mod retune_view;
 use retune_view::Retune;
@@ -115,6 +120,9 @@ pub struct StudioApp {
     sel_ch: u32,
     view: View,
     show_playlist: bool,
+    /// PC: zona de abajo (Channel Rack / Piano Roll / Mixer / Pads) abierta, y la vista que se vio la última vez
+    ver_vista: bool,
+    vista_prev: View,
     tool: usize,
     note_len: u32,
     note_vel: f32,
@@ -217,6 +225,25 @@ pub struct StudioApp {
     trazo: std::collections::VecDeque<(f32, f32)>,
     /// ancho de un compás en la playlist (zoom)
     pl_bw: f32,
+    /// desplazamiento horizontal que pide el seguimiento de la canción para el próximo cuadro
+    pl_seguir: Option<f32>,
+    /// paneo de la playlist (arrastrar el fondo): desplazamiento pedido, si se está arrastrando,
+    /// velocidad para la inercia y cuándo la moviste a mano (el seguimiento espera un poco)
+    pl_mover: Option<Vec2>,
+    pl_paneo: bool,
+    pl_vel: Vec2,
+    pl_manual: f64,
+    /// paneo solo de lado (empezó en la regla de compases)
+    pl_paneo_h: bool,
+    /// portapapeles de la playlist, toque en curso (teléfono), barrita de acciones y último toque (doble toque)
+    pl_copia: Option<ClipCopia>,
+    pl_toque: Option<Toque>,
+    pl_barra: Option<Barra>,
+    pl_doble: (f64, Option<(Kind, u32)>),
+    /// Ajustes > Teclas: acción esperando su tecla nueva
+    tecla_captura: Option<&'static str>,
+    /// tecla de mover la vista: None = suelta; Some(se usó para arrastrar)
+    mano: Option<bool>,
     /// toques de «Tocar» para sacar el tempo
     toques: Vec<f64>,
     /// pads de batería y acordes
@@ -234,6 +261,8 @@ pub struct StudioApp {
     entradas_t: Option<Instant>,
     /// selector de audio del teléfono abierto (None dentro = lista de lugares)
     elegir_audio: Option<Option<PathBuf>>,
+    /// el audio elegido en el selector del teléfono va al Channel Rack (pad nuevo) y no a la playlist
+    elegir_al_rack: bool,
     elegir_cache: Option<(PathBuf, Vec<(String, PathBuf, bool)>)>,
     /// panel lateral de letras y notas
     letras_panel: bool,
@@ -255,6 +284,8 @@ pub struct StudioApp {
     zoom_puesto: f32,
     ajuste_sec: usize,
     export_dir_inicial: PathBuf,
+    /// teléfono: la pantalla se pidió encendida (mientras suena o graba)
+    pantalla_on: bool,
 }
 
 /// Acciones que pueden perder cambios sin guardar.
@@ -275,7 +306,16 @@ impl StudioApp {
     pub fn new(cc: &eframe::CreationContext<'_>, plat: Platform) -> Self {
         setup_style(&cc.egui_ctx, plat.mobile);
         let _ = std::fs::create_dir_all(&plat.data_dir);
-        let settings = StudioApp::load_settings(&plat.data_dir);
+        let mut settings = StudioApp::load_settings(&plat.data_dir);
+        if plat.mobile && !settings.zoom_movil_v2 {
+            settings.zoom_movil_v2 = true;
+            if settings.zoom >= 1.29 {
+                settings.zoom = 1.0;
+            }
+            if let Ok(s) = serde_json::to_string_pretty(&settings) {
+                let _ = std::fs::write(plat.data_dir.join("ajustes.json"), s);
+            }
+        }
         // por defecto siempre empieza un proyecto nuevo; el último solo si así está en Ajustes
         let ultimo = if settings.abrir_ultimo {
             std::fs::read_to_string(plat.data_dir.join("autosave.json")).ok().and_then(|s| serde_json::from_str::<Project>(&s).ok()).filter(|p| p.version == 1 && !p.patterns.is_empty() && !p.channels.is_empty())
@@ -302,7 +342,7 @@ impl StudioApp {
         let sel_ch = p.channels.iter().find(|c| c.inst.melodic()).unwrap_or(&p.channels[0]).id;
         let msg = match &audio_err {
             None if plat.mobile => "Listo.".to_string(),
-            None => "Listo. Espacio: reproducir · Enter: PAT/SONG · F5/F6/F7/F9: ventanas.".to_string(),
+            None => "Listo. Espacio: reproducir · Enter: PAT/SONG · F5 a F8: abrir o cerrar ventanas.".to_string(),
             Some(e) => format!("Sin audio: {e}"),
         };
         let (tune_tx, tune_rx) = mpsc::channel();
@@ -318,6 +358,8 @@ impl StudioApp {
             sel_ch,
             view: if plat.mobile { View::Playlist } else { View::Rack },
             show_playlist: true,
+            ver_vista: true,
+            vista_prev: View::Rack,
             tool: 0,
             note_len: 4,
             note_vel: 0.8,
@@ -407,6 +449,18 @@ impl StudioApp {
             mic_panel: false,
             trazo: std::collections::VecDeque::with_capacity(400),
             pl_bw: 72.0,
+            pl_seguir: None,
+            pl_mover: None,
+            pl_paneo: false,
+            pl_vel: Vec2::ZERO,
+            pl_manual: -100.0,
+            pl_paneo_h: false,
+            tecla_captura: None,
+            pl_copia: None,
+            pl_toque: None,
+            pl_barra: None,
+            pl_doble: (-10.0, None),
+            mano: None,
             permisos_pedidos: false,
             pads: Default::default(),
             toques: vec![],
@@ -417,6 +471,7 @@ impl StudioApp {
             entradas: vec![],
             entradas_t: None,
             elegir_audio: None,
+            elegir_al_rack: false,
             elegir_cache: None,
             letras_panel: false,
             retune: None,
@@ -432,6 +487,7 @@ impl StudioApp {
             zoom_puesto: -1.0,
             ajuste_sec: 0,
             export_dir_inicial,
+            pantalla_on: false,
         };
         if !app.settings.tutorial_done {
             app.tut_mostrar(0);
@@ -523,7 +579,7 @@ impl StudioApp {
             let (rr, _) = ui.allocate_exact_size(ctx.content_rect().size(), Sense::click());
             ui.painter().rect_filled(rr, 0, Color32::from_black_alpha(150));
         });
-        egui::Area::new(egui::Id::new("dlg_rescate")).order(egui::Order::Tooltip).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+        egui::Area::new(egui::Id::new("dlg_rescate")).order(egui::Order::Tooltip).pivot(Align2::CENTER_CENTER).current_pos(pos_dialogo(ctx, egui::Id::new("dlg_rescate"))).movable(true).show(ctx, |ui| {
             Frame::new().fill(PANEL).stroke(Stroke::new(1.5, ACCENT)).corner_radius(10).inner_margin(Margin::same(18)).show(ui, |ui| {
                 ui.set_width(420.0);
                 ui.label(RichText::new("¿Recuperar tu trabajo?").strong().size(18.0).color(Color32::WHITE));
@@ -580,7 +636,7 @@ impl StudioApp {
             let (rr, _) = ui.allocate_exact_size(ctx.content_rect().size(), Sense::click());
             ui.painter().rect_filled(rr, 0, Color32::from_black_alpha(150));
         });
-        egui::Area::new(egui::Id::new("dlg_guardar")).order(egui::Order::Tooltip).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+        egui::Area::new(egui::Id::new("dlg_guardar")).order(egui::Order::Tooltip).pivot(Align2::CENTER_CENTER).current_pos(pos_dialogo(ctx, egui::Id::new("dlg_guardar"))).movable(true).show(ctx, |ui| {
             Frame::new().fill(PANEL).stroke(Stroke::new(1.5, ACCENT)).corner_radius(10).inner_margin(Margin::same(18)).show(ui, |ui| {
                 ui.set_width(400.0);
                 ui.label(RichText::new("¿Guardar los cambios?").strong().size(18.0).color(Color32::WHITE));
@@ -912,59 +968,118 @@ impl StudioApp {
     }
 
     // ---------- teclado ----------
+    /// Atajos de teclado (se cambian en Ajustes > Teclas).
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        let typing = ctx.memory(|m| m.focused().is_some());
-        let rec = ctx.input(|i| i.modifiers.command && i.key_pressed(Key::R));
-        if rec && !typing {
-            if self.rec_track.is_some() { self.rec_track_stop() } else { self.rec_track_start() }
-        }
-        let (space, enter, undo, save, f5, f6, f7, f9, m) = ctx.input(|i| {
-            (
-                i.key_pressed(Key::Space),
-                i.key_pressed(Key::Enter),
-                i.modifiers.command && i.key_pressed(Key::Z),
-                i.modifiers.command && i.key_pressed(Key::S),
-                i.key_pressed(Key::F5),
-                i.key_pressed(Key::F6),
-                i.key_pressed(Key::F7),
-                i.key_pressed(Key::F9),
-                !i.modifiers.command && i.key_pressed(Key::M) && !i.modifiers.shift,
-            )
-        });
-        if f5 {
-            self.show_playlist = !self.show_playlist;
-        }
-        if f6 {
-            self.view = View::Rack;
-        }
-        if f7 {
-            self.view = View::Roll;
-            self.roll_center = true;
-        }
-        if f9 {
-            self.view = View::Mixer;
-        }
-        if ctx.input(|i| i.key_pressed(Key::F8)) {
-            self.view = View::Pads;
-        }
-        if typing {
+        if self.tecla_captura.is_some() {
+            // se está eligiendo una tecla nueva en Ajustes: nada más reacciona
             return;
         }
-        if space {
-            self.toggle_play();
+        let typing = ctx.memory(|m| m.focused().is_some());
+        // con los Pads a la vista, las teclas de los pads son de los pads (no disparan otra acción)
+        let pads_visibles = self.view == View::Pads && (self.ver_vista || self.plat.mobile || ctx.content_rect().width() < 900.0);
+        let tecla_de_pad = |this: &Self, id: &str| {
+            pads_visibles && this.atajo(id).is_some_and(|a| teclas::PADS_IDS.iter().any(|p| this.atajo(p) == Some(a)))
+        };
+        let t = |this: &Self, id: &str| this.tecla(ctx, id) && !tecla_de_pad(this, id);
+        // las ventanas (F5…) andan aunque estés escribiendo
+        for (id, v) in [("rack", View::Rack), ("roll", View::Roll), ("mixer", View::Mixer), ("pads", View::Pads)] {
+            if t(self, id) {
+                self.alternar_vista(v);
+            }
         }
-        if enter {
+        if typing {
+            self.mano = None;
+            return;
+        }
+        // Espacio: tocar y soltar = play/pausa; mantener y arrastrar en la playlist = mover la vista.
+        // Si play y «mover la vista» tienen la misma tecla, el play se decide al soltar.
+        let (play, mano) = (self.atajo("play"), self.atajo("mano"));
+        let comparten = play.is_some() && play.map(|a| a.key) == mano.map(|a| a.key);
+        if let Some(m) = mano {
+            if ctx.input(|i| m.apretado(i)) {
+                self.mano = Some(false);
+            }
+        }
+        if comparten {
+            let p = play.unwrap();
+            if self.mano.is_some() && ctx.input(|i| p.soltado(i)) {
+                if self.mano == Some(false) && !tecla_de_pad(self, "play") {
+                    self.toggle_play();
+                }
+                self.mano = None;
+            }
+        } else {
+            if t(self, "play") {
+                self.toggle_play();
+            }
+            if let Some(m) = mano {
+                if ctx.input(|i| m.soltado(i)) {
+                    self.mano = None;
+                }
+            }
+        }
+        if t(self, "detener") {
+            self.stop();
+        }
+        if t(self, "grabar") {
+            if self.rec_track.is_some() { self.rec_track_stop() } else { self.rec_track_start() }
+        }
+        if t(self, "pat_song") {
             self.set_song_mode(!self.song_mode);
         }
-        if undo {
-            self.undo();
-        }
-        if save {
-            self.save_project();
-        }
-        if m {
+        if t(self, "metronomo") {
             self.metro = !self.metro;
             self.cmd(Cmd::Metronome(self.metro));
+        }
+        if t(self, "bucle") {
+            self.snap();
+            self.p.loop_on = !self.p.loop_on;
+            self.cambios = true;
+            self.send();
+            self.msg = if self.p.loop_on { "Bucle encendido.".into() } else { "Bucle apagado.".into() };
+        }
+        if t(self, "inicio") {
+            self.play_from = 0;
+            if self.playing() {
+                self.play(0);
+            }
+            self.pl_seguir = Some(0.0);
+        }
+        if t(self, "guardar") {
+            self.save_project();
+        }
+        if t(self, "guardar_como") {
+            self.guardar(true);
+        }
+        if t(self, "abrir") {
+            self.pedir(Pend::Abrir);
+        }
+        if t(self, "nuevo") {
+            self.pedir(Pend::Nuevo(usize::MAX));
+        }
+        if t(self, "deshacer") {
+            self.undo();
+        }
+        if t(self, "exportar_mp3") {
+            self.start_export(Format::Mp3);
+        }
+        if t(self, "exportar_wav") {
+            self.start_export(Format::Wav);
+        }
+        if t(self, "microfono") {
+            self.mic_panel = !self.mic_panel;
+        }
+        if t(self, "letras") {
+            self.letras_panel = !self.letras_panel;
+        }
+        if t(self, "ajustes") {
+            self.alternar_win(Win::Settings);
+        }
+        if t(self, "acercar") {
+            self.pl_bw = (self.pl_bw * 1.25).min(240.0);
+        }
+        if t(self, "alejar") {
+            self.pl_bw = (self.pl_bw / 1.25).max(16.0);
         }
     }
 
@@ -1475,7 +1590,16 @@ impl StudioApp {
         });
         egui::CentralPanel::default().frame(Frame::new().fill(PANEL)).show(ui, |ui| {
             self.playlist_toolbar(ui);
-            egui::ScrollArea::both().id_salt("pl").auto_shrink([false, false]).show(ui, |ui| self.playlist_canvas(ui));
+            let mut area = egui::ScrollArea::both().id_salt("pl").auto_shrink([false, false]);
+            // seguimiento de la canción: solo se mueve de lado, el desplazamiento vertical no se toca
+            if let Some(o) = self.pl_mover.take() {
+                // lo que mueves a mano manda sobre el seguimiento
+                self.pl_seguir = None;
+                area = area.scroll_offset(o.max(Vec2::ZERO));
+            } else if let Some(x) = self.pl_seguir.take() {
+                area = area.horizontal_scroll_offset(x.max(0.0));
+            }
+            area.show(ui, |ui| self.playlist_canvas(ui));
         });
     }
 
@@ -1645,7 +1769,9 @@ impl StudioApp {
                     self.show_playlist = true;
                 }
             } else if c.inst.uses_steps() && !pat.notes.get(&id).is_some_and(|v| !v.is_empty()) {
-                let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 28.0), Sense::click_and_drag());
+                // en el teléfono los pasos solo se tocan: arrastrar el dedo desliza la vista (con inercia)
+                let sentido = if self.plat.mobile { Sense::click() } else { Sense::click_and_drag() };
+                let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 28.0), sentido);
                 if self.tut_kick_id() == Some(id) {
                     self.tut_mark("kick", rect.intersect(ui.clip_rect()));
                 }
@@ -1938,7 +2064,23 @@ impl StudioApp {
             }
             let out = sa.show_viewport(ui, |ui, vp| {
                 let size = Vec2::new(KW + steps as f32 * CW, rows * RH);
-                let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
+                // teléfono: arrastrar en el vacío desliza la vista; arrastrar una nota la mueve o la alarga
+                let sentido = if self.plat.mobile {
+                    let previo = Rect::from_min_size(ui.cursor().min, size);
+                    let sobre_nota = ui.input(|i| i.pointer.press_origin()).is_some_and(|p| {
+                        pat.notes.get(&ch).is_some_and(|ns| {
+                            ns.iter().any(|n| {
+                                let x = previo.left() + KW + n.s as f32 * CW;
+                                let y = previo.top() + (HIGH.saturating_sub(n.m)) as f32 * RH;
+                                Rect::from_min_size(Pos2::new(x, y), Vec2::new((n.l as f32 * CW).max(8.0), RH)).expand(6.0).contains(p)
+                            })
+                        })
+                    });
+                    if sobre_nota { Sense::click_and_drag() } else { Sense::click() }
+                } else {
+                    Sense::click_and_drag()
+                };
+                let (rect, resp) = ui.allocate_exact_size(size, sentido);
                 let painter = ui.painter_at(rect);
                 let gx = rect.left() + KW;
                 let row_y = |m: u8| rect.top() + (HIGH - m) as f32 * RH;
@@ -2369,29 +2511,47 @@ impl StudioApp {
             let tabs: &[(View, &str)] = if compact {
                 &[(View::Playlist, "Playlist"), (View::Rack, "Channel Rack"), (View::Roll, "Piano Roll"), (View::Mixer, "Mixer"), (View::Pads, "Pads")]
             } else {
-                &[(View::Rack, "Channel Rack  F6"), (View::Roll, "Piano Roll  F7"), (View::Mixer, "Mixer  F9"), (View::Pads, "Pads  F8")]
+                &[(View::Rack, "Channel Rack  F5"), (View::Roll, "Piano Roll  F6"), (View::Mixer, "Mixer  F7"), (View::Pads, "Pads  F8")]
             };
             for &(v, n) in tabs {
-                let sel = self.view == v || (!compact && v == View::Rack && self.view == View::Playlist);
+                let activa = self.view == v || (!compact && v == View::Rack && self.view == View::Playlist);
+                // en la PC la pestaña se ve encendida solo si su zona está abierta
+                let sel = activa && (compact || self.ver_vista);
                 let r = pestana_metal(ui, sel, n, if compact { 0.0 } else { 130.0 });
                 if v == View::Mixer {
                     self.tut_mark("mixer", r.rect);
                 }
                 if r.clicked() {
-                    self.view = v;
-                    if v == View::Roll {
-                        self.roll_center = true;
+                    if compact && self.view == v && v != View::Playlist {
+                        // teléfono: tocar otra vez la pestaña activa la cierra y vuelve a la Playlist
+                        self.view = View::Playlist;
+                    } else if compact {
+                        self.view = v;
+                        if v == View::Roll {
+                            self.roll_center = true;
+                        }
+                    } else {
+                        self.alternar_vista(v);
                     }
                 }
             }
-            if !compact {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if pestana_metal(ui, self.show_playlist, "Playlist  F5", 120.0).clicked() {
-                        self.show_playlist = !self.show_playlist;
-                    }
-                });
-            }
         });
+    }
+
+    /// Pestaña o tecla F5/F6/F7/F8: si esa vista ya está abierta abajo, se cierra la zona (en la PC);
+    /// si no, se abre con esa vista.
+    fn alternar_vista(&mut self, v: View) {
+        let actual = if self.view == View::Playlist { View::Rack } else { self.view };
+        if !self.plat.mobile && self.ver_vista && actual == v {
+            self.ver_vista = false;
+        } else {
+            self.view = v;
+            self.ver_vista = true;
+            if v == View::Roll {
+                self.roll_center = true;
+            }
+        }
+        self.vista_prev = self.view;
     }
 
     fn show_view(&mut self, ui: &mut Ui, v: View) {
@@ -2575,11 +2735,25 @@ impl eframe::App for StudioApp {
         for k in 0..2 {
             self.mmeter[k] = mp[k].max(self.mmeter[k] * 0.88);
         }
+        // teléfono: mientras suena o graba la pantalla no se apaga (si se apaga, Android pausa la app y se corta)
+        let activo = self.playing() || self.rec_track.is_some() || self.rec.is_some();
+        if activo != self.pantalla_on {
+            self.pantalla_on = activo;
+            #[cfg(target_os = "android")]
+            audio::pantalla_encendida(activo);
+        }
         // mientras suena: 30 cuadros por segundo (el cabezal y los vúmetros se ven fluidos y gasta la mitad que a 60)
-        if self.playing() || self.job.is_some() || self.meters.iter().any(|m| *m > 0.001) {
+        if self.song_mode && self.playing() {
+            // la playlist sigue a la canción: a la tasa de la pantalla se ve fluido (a 30 cuadros, a saltos)
+            ctx.request_repaint();
+        } else if self.playing() || self.job.is_some() || self.meters.iter().any(|m| *m > 0.001) {
             ctx.request_repaint_after(Duration::from_millis(33));
         }
         let compact = self.plat.mobile || ui.available_width() < 900.0;
+        if self.view != self.vista_prev {
+            self.vista_prev = self.view;
+            self.ver_vista = true;
+        }
 
         egui::Panel::top("top").frame(Frame::new().fill(BG).inner_margin(Margin::symmetric(10, 7))).show(ui, |ui| {
             // barra de arriba en forma de píldora, gris muy oscuro con borde sutil
@@ -2643,6 +2817,14 @@ impl eframe::App for StudioApp {
             egui::Panel::top("tabs").frame(Frame::new().fill(Color32::from_gray(18)).inner_margin(Margin::symmetric(0, 4))).show(ui, |ui| self.view_tabs(ui, true));
             let v = self.view;
             egui::CentralPanel::default().frame(Frame::new().fill(PANEL)).show(ui, |ui| self.show_view(ui, v));
+        } else if !self.ver_vista {
+            // zona de abajo cerrada: las pestañas quedan abajo y la Playlist usa todo el alto
+            egui::Panel::bottom("docktabs_abajo").frame(Frame::new().fill(Color32::from_gray(18)).inner_margin(Margin::symmetric(0, 4))).show(ui, |ui| self.view_tabs(ui, false));
+            egui::CentralPanel::default().frame(Frame::new().fill(PANEL)).show(ui, |ui| {
+                if self.show_playlist {
+                    self.playlist(ui);
+                }
+            });
         } else {
             if self.show_playlist {
                 egui::Panel::top("playlist").resizable(true).default_size(ui.available_height() * 0.4).min_size(120.0).frame(Frame::new().fill(PANEL)).show(ui, |ui| self.playlist(ui));
@@ -2654,6 +2836,7 @@ impl eframe::App for StudioApp {
 
         self.plugin_windows(&ctx);
         self.playlist_menu(&ctx);
+        self.barra_clip(&ctx);
         self.dialogo_guardar(&ctx);
         self.dialogo_rescate(&ctx);
         self.selector_audio(&ctx);
@@ -2669,7 +2852,8 @@ impl eframe::App for StudioApp {
         }
         // tamaño de la interfaz: se revisa en cada cuadro porque Android lo reinicia al volver a la app
         // en el teléfono la escala nativa (≈2,75) deja todo enorme: se usa el 60 %
-        let base = if self.plat.mobile { 0.6 } else { 1.0 };
+        // teléfono: «Normal» es lo que antes era «Muy grande» (0,6 × 1,3); la PC no cambia
+        let base = if self.plat.mobile { 0.6 * 1.3 } else { 1.0 };
         let deseado = (self.settings.zoom * base).clamp(0.5, 2.0);
         if (ctx.zoom_factor() - deseado).abs() > 0.001 {
             self.zoom_puesto = self.settings.zoom;
@@ -2684,7 +2868,7 @@ impl eframe::App for StudioApp {
         if let Some(list) = self.open_list.clone() {
             let mut open = true;
             let mut pick = None;
-            egui::Window::new("Abrir proyecto").open(&mut open).collapsible(false).anchor(Align2::CENTER_CENTER, Vec2::ZERO).show(&ctx, |ui| {
+            egui::Window::new("Abrir proyecto").id(egui::Id::new("dlg_abrir")).open(&mut open).collapsible(false).pivot(Align2::CENTER_CENTER).current_pos(pos_dialogo(&ctx, egui::Id::new("dlg_abrir"))).show(&ctx, |ui| {
                 if list.is_empty() {
                     ui.label(format!("No hay proyectos guardados en\n{}", self.plat.export_dir.display()));
                 }
@@ -3088,6 +3272,22 @@ fn pestana_metal(ui: &mut Ui, sel: bool, texto: &str, ancho_min: f32) -> Respons
     }
     p.text(r.center(), Align2::CENTER_CENTER, texto, FontId::proportional(13.5), lerp_col(Color32::from_gray(200), Color32::WHITE, t));
     resp
+}
+
+/// Posición de un cuadro de diálogo: siempre al centro real de la pantalla (en el teléfono el tamaño de
+/// la interfaz cambia después de abrir, por eso no basta con calcularlo una vez) hasta que lo arrastras;
+/// desde ahí se queda donde lo dejaste.
+pub(super) fn pos_dialogo(ctx: &egui::Context, id: egui::Id) -> Pos2 {
+    let movido = id.with("movido_por_usuario");
+    if ctx.is_being_dragged(id.with("move")) {
+        ctx.data_mut(|d| d.insert_temp(movido, true));
+    }
+    let centro = ctx.content_rect().center();
+    if ctx.data(|d| d.get_temp::<bool>(movido)).unwrap_or(false) {
+        ctx.memory(|m| m.area_rect(id)).map(|r| r.center()).unwrap_or(centro)
+    } else {
+        centro
+    }
 }
 
 /// Contenido de un menú que se puede deslizar (con el dedo o la rueda) si no entra en la pantalla.

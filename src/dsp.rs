@@ -240,6 +240,14 @@ impl Voice {
             Inst::Bass => (Biquad::new(FType::Low, 320.0, 0.7, 0.0, sr), Biquad::default(), len.max(0.08)),
             Inst::Bell => (Biquad::default(), Biquad::default(), 1.2),
             Inst::Synth | Inst::Vocal | Inst::Sampler | Inst::Audio | Inst::Plugin => (Biquad::default(), Biquad::default(), len.max(0.05)),
+            Inst::Tom => (Biquad::new(FType::Band, 2500.0, 0.8, 0.0, sr), Biquad::default(), 0.45 * d + 0.05),
+            Inst::Conga => (Biquad::new(FType::Band, 3000.0, 1.0, 0.0, sr), Biquad::default(), 0.22 * d + 0.03),
+            Inst::Cowbell => (Biquad::new(FType::Band, 900.0 * k, 2.0, 0.0, sr), Biquad::default(), 0.35 * d + 0.03),
+            Inst::Clave => (Biquad::default(), Biquad::default(), 0.08 * d + 0.02),
+            Inst::Snap => (Biquad::new(FType::Band, 2300.0 * k, 2.2, 0.0, sr), Biquad::default(), 0.09 * d + 0.02),
+            Inst::Shaker => (Biquad::new(FType::Band, (6500.0 * k).min(15000.0), 1.4, 0.0, sr), Biquad::new(FType::High, 3000.0, 0.7, 0.0, sr), 0.12 * d + 0.03),
+            Inst::Ride => (Biquad::new(FType::High, (5500.0 * k).min(15000.0), 0.7, 0.0, sr), Biquad::default(), 1.6 * d + 0.1),
+            Inst::Crash => (Biquad::new(FType::High, (4200.0 * k).min(15000.0), 0.7, 0.0, sr), Biquad::new(FType::Band, 3300.0 * k, 0.6, 0.0, sr), 2.0 * d + 0.1),
         };
         let note = m.round().clamp(0.0, 127.0) as u8;
         Voice { ch, kind, delay, t: 0.0, end, vel, freq: mtof(m), k, d, len, ph: [0.0; 4], f1, f2, rng, m, wave: None, sample: None, spos: 0.0, srate: 1.0, done: false, note, held: false, smp: None, pan: 0.0, ex: [1.0; 2], exf: [0.0; 2] }
@@ -423,6 +431,65 @@ impl Voice {
             Inst::OHat => {
                 let e = self.caida(0, 0.3 * d, dt);
                 self.f1.run(self.rng.next()) * v * 0.50 * e
+            }
+            Inst::Tom => {
+                // tono que baja un poco al golpear, con un toque de ruido al principio
+                let f = 105.0 * k * (1.0 + 0.6 * self.caida(0, 0.05 * 9.21, dt));
+                self.ph[0] = (self.ph[0] + f * dt).fract();
+                let env = if t < 0.003 { t / 0.003 } else { self.caida(1, 0.45 * d, dt) };
+                let golpe = if t < 0.02 { self.f1.run(self.rng.next()) * 0.25 * exp_dec(t, 0.02) } else { 0.0 };
+                (sin_v(self.ph[0]) * 0.85 * env + golpe) * v
+            }
+            Inst::Conga => {
+                let f = 330.0 * k * (1.0 + 0.12 * self.caida(0, 0.02 * 9.21, dt));
+                self.ph[0] = (self.ph[0] + f * dt).fract();
+                let env = if t < 0.002 { t / 0.002 } else { self.caida(1, 0.22 * d, dt) };
+                let palma = if t < 0.012 { self.f1.run(self.rng.next()) * 0.3 * exp_dec(t, 0.012) } else { 0.0 };
+                (sin_v(self.ph[0]) * 0.7 * env + palma) * v
+            }
+            Inst::Cowbell => {
+                // dos cuadradas desafinadas (como la 808) por un pasabanda
+                self.ph[0] = (self.ph[0] + 540.0 * k * dt).fract();
+                self.ph[1] = (self.ph[1] + 800.0 * k * dt).fract();
+                let a = if self.ph[0] < 0.5 { 1.0 } else { -1.0 };
+                let b = if self.ph[1] < 0.5 { 1.0 } else { -1.0 };
+                let x = self.f1.run(0.5 * (a + b));
+                let env = if t < 0.02 { 1.0 - 0.4 * (t / 0.02) } else { 0.6 * exp_dec(t - 0.02, 0.33 * d) };
+                x * v * 0.55 * env
+            }
+            Inst::Clave => {
+                self.ph[0] = (self.ph[0] + 2500.0 * k * dt).fract();
+                sin_v(self.ph[0]) * v * 0.55 * self.caida(0, 0.06 * d, dt)
+            }
+            Inst::Snap => {
+                // chasquido: ruido muy corto con un pico de tono
+                self.ph[0] = (self.ph[0] + 1800.0 * k * dt).fract();
+                let e = self.caida(0, 0.07 * d, dt);
+                (self.f1.run(self.rng.next()) * 2.0 + sin_v(self.ph[0]) * 0.25 * exp_dec(t, 0.01)) * v * 0.85 * e
+            }
+            Inst::Shaker => {
+                // entra suave (el grano se mueve) y se apaga rapido
+                let ataque = (t / 0.018).min(1.0);
+                let e = self.caida(0, 0.1 * d, dt);
+                self.f2.run(self.f1.run(self.rng.next())) * v * 2.3 * ataque * e
+            }
+            Inst::Ride => {
+                // metal: cuatro cuadradas inarmonicas + ruido agudo y un ping de campana
+                let fs = [296.0f32, 443.0, 581.0, 873.0];
+                let mut m = 0.0f32;
+                for (i, f) in fs.iter().enumerate() {
+                    self.ph[i] = (self.ph[i] + f * 2.0 * k * dt).fract();
+                    m += if self.ph[i] < 0.5 { 1.0 } else { -1.0 };
+                }
+                let e = self.caida(0, 1.5 * d, dt);
+                let ping = sin_v((t * 3300.0 * k).fract()) * 0.12 * exp_dec(t, 0.25);
+                let ruido = self.rng.next();
+                (self.f1.run(m * 0.18 + ruido * 0.35) * e + ping) * v * 0.75
+            }
+            Inst::Crash => {
+                let e = if t < 0.004 { t / 0.004 } else { self.caida(0, 1.9 * d, dt) };
+                let ruido = self.rng.next();
+                (self.f1.run(ruido) * 0.8 + self.f2.run(ruido) * 0.35) * v * 0.55 * e
             }
             Inst::Rhodes => {
                 // FM: portadora y moduladora 1:1, índice que cae de 1.6 a 0.15
