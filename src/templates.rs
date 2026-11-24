@@ -2,7 +2,7 @@
 use crate::project::*;
 use std::collections::HashMap;
 
-pub const TEMPLATES: [&str; 8] = ["Vacío", "Trap", "Reggaetón (dembow)", "Boom bap", "House", "Lo-fi", "Drill", "Trap oscuro «Neblina»"];
+pub const TEMPLATES: [&str; 8] = ["Vacío", "Trap", "Reggaetón (dembow)", "Boom bap", "House", "Lo-fi", "Drill", "Trap oscuro"];
 pub const KITS: [&str; 6] = ["Boom bap polvoriento", "Trap 808", "Reggaetón", "House limpio", "Lo-fi suave", "Drill oscuro"];
 
 fn steps(n: usize, on: &[usize], v: f32) -> Vec<f32> {
@@ -112,7 +112,7 @@ fn vsteps(n: usize, on: &[(usize, f32)]) -> Vec<f32> {
 /// Trap oscuro en La# menor frigio (la segunda menor, Si, le da el tono sombrío), 150 bpm a medio tiempo.
 /// Estructura de 32 compases: intro (4) · coro (8) · verso (8) · coro (8) · salida (4).
 fn neblina() -> Project {
-    let mut p = Project::empty("Neblina", 150.0);
+    let mut p = Project::empty("Trap oscuro", 150.0);
     p.key = 10; // La#
     p.scale = 4; // frigia
     p.swing = 0.06;

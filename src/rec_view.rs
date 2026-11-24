@@ -96,10 +96,28 @@ impl StudioApp {
         ui.add_space(6.0);
         let apilado = self.plat.mobile || ui.available_width() < 1000.0;
         ui.with_layout(if apilado { Layout::top_down(Align::Min) } else { Layout::left_to_right(Align::Min) }, |ui| {
-            // ---------------- izquierda: entrada y escucha
-            ui.vertical(|ui| {
-                ui.set_width(230.0);
-                ui.label(RichText::new("Entrada").strong());
+            // ---------------- entrada y escucha: en la PC, columna a la izquierda de NN Tune; en el teléfono,
+            // una franja compacta a lo ancho (micrófono, canal y nivel; escucharme, nivelado y efectos)
+            let franja = apilado;
+            let contenedor = |ui: &mut Ui, f: &mut dyn FnMut(&mut Ui)| {
+                if franja {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(12.0, 8.0);
+                        f(ui)
+                    });
+                } else {
+                    ui.vertical(|ui| {
+                        ui.set_width(230.0);
+                        f(ui)
+                    });
+                }
+            };
+            contenedor(ui, &mut |ui: &mut Ui| {
+                if !franja {
+                    ui.label(RichText::new("Entrada").strong());
+                } else {
+                    ui.label(RichText::new("Entrada").small().color(DIM));
+                }
                 // micrófonos conectados (se vuelven a buscar cada 3 s: así aparecen los que se conectan)
                 if self.entradas_t.is_none_or(|t| t.elapsed() > Duration::from_secs(3)) {
                     self.entradas = audio::inputs();
@@ -134,10 +152,12 @@ impl StudioApp {
                     // vuelve a abrir la escucha con el canal nuevo (si no, se queda en silencio)
                     self.escucha_sync();
                 }
-                ui.add_space(8.0);
+                if !franja {
+                    ui.add_space(8.0);
+                }
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Nivel").small().color(DIM));
-                    let (r, _) = ui.allocate_exact_size(Vec2::new(180.0, 8.0), Sense::hover());
+                    let (r, _) = ui.allocate_exact_size(Vec2::new(if franja { 240.0 } else { 180.0 }, 8.0), Sense::hover());
                     let p = ui.painter();
                     p.rect_filled(r, 4, Color32::from_gray(12));
                     let db = if self.in_meter > 0.0 { 20.0 * self.in_meter.log10() } else { -99.0 };
@@ -145,7 +165,12 @@ impl StudioApp {
                     let col = if self.in_meter > 0.97 { RED } else if db > -9.0 { Color32::from_rgb(220, 200, 70) } else { GREEN };
                     p.rect_filled(Rect::from_min_size(r.min, Vec2::new(r.width() * f, r.height())), 4, col);
                 });
-                ui.add_space(10.0);
+                if franja {
+                    // segunda fila: cómo te escuchas y grabas
+                    ui.end_row();
+                } else {
+                    ui.add_space(10.0);
+                }
                 // botón tipo pastilla con audífonos
                 let on = self.settings.escucharme;
                 let (r, resp) = ui.allocate_exact_size(Vec2::new(200.0, 36.0), Sense::click());
@@ -165,7 +190,9 @@ impl StudioApp {
                 if resp.on_hover_text("Oír tu voz en los audífonos").clicked() {
                     self.settings.escucharme = !on;
                 }
-                ui.label(RichText::new("Usa audífonos: con parlantes se produce un pitido fuerte.").small().color(DIM));
+                if !franja {
+                    ui.label(RichText::new("Usa audífonos: con parlantes se produce un pitido fuerte.").small().color(DIM));
+                }
                 // aviso si el micrófono llega recortado (ya saturado antes de entrar a la app)
                 let rec = self.status.monitor.recortes.load(Ordering::Relaxed);
                 let ahora = ui.input(|i| i.time);
@@ -176,15 +203,19 @@ impl StudioApp {
                     ui.label(RichText::new("Tu micrófono llega saturado: aléjalo un poco de la boca o bájale el volumen (si tiene perilla). Eso no se puede arreglar después.").small().color(RED));
                     ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
                 }
-                ui.add_space(6.0);
+                if !franja {
+                    ui.add_space(6.0);
+                }
                 let mut niv = self.settings.nivelar_grabacion;
-                if ui.checkbox(&mut niv, "Grabar con el volumen nivelado").on_hover_text("La toma queda tan fuerte y pareja como te escuchas (si lo apagas, se graba tal cual llega del micrófono)").changed() {
+                if ui.checkbox(&mut niv, if franja { "Grabar nivelado" } else { "Grabar con el volumen nivelado" }).on_hover_text("La toma queda tan fuerte y pareja como te escuchas (si lo apagas, se graba tal cual llega del micrófono)").changed() {
                     self.settings.nivelar_grabacion = niv;
                     self.save_settings();
                 }
                 // efectos de voz del canal elegido (se oyen en la canción y al exportar)
                 if let Some(c) = self.p.channel(self.sel_ch).filter(|c| matches!(c.inst, Inst::Audio | Inst::Vocal)).cloned() {
-                    ui.add_space(10.0);
+                    if !franja {
+                        ui.add_space(10.0);
+                    }
                     ui.label(RichText::new(format!("Efectos de voz · {}", c.name)).small().color(DIM));
                     let mut i_sel = usize::MAX;
                     egui::ComboBox::from_id_salt("voz_fx").width(220.0).selected_text("Elegir efectos…").show_ui(ui, |ui| {
@@ -203,11 +234,22 @@ impl StudioApp {
                         self.send();
                     }
                 }
+                if franja && self.settings.escucharme {
+                    // el aviso de audífonos, en una línea chica, solo cuando te estás escuchando
+                    ui.end_row();
+                    ui.label(RichText::new("Usa audífonos: con parlantes se produce un pitido fuerte.").small().color(DIM));
+                }
             });
-            ui.add_space(12.0);
-            // ---------------- centro: tarjeta de NN Tune
-            let ancho = (ui.available_width() - 70.0).clamp(560.0, 860.0);
-            Frame::new().fill(Color32::from_gray(27)).stroke(Stroke::new(1.0, LINE)).corner_radius(12).inner_margin(Margin::same(16)).show(ui, |ui| {
+            if franja {
+                ui.add_space(4.0);
+                ui.separator();
+            }
+            ui.add_space(if franja { 6.0 } else { 12.0 });
+            // ---------------- tarjeta de NN Tune y, a su derecha, la de volumen (lado a lado, como en la PC)
+            // en el teléfono NN Tune se angosta lo justo para que la de volumen quepa al lado
+            let ancho = if apilado { (ui.available_width() - 180.0).clamp(420.0, 860.0) } else { (ui.available_width() - 70.0).clamp(560.0, 860.0) };
+            ui.horizontal_top(|ui| {
+            let alto_tune = Frame::new().fill(Color32::from_gray(27)).stroke(Stroke::new(1.0, LINE)).corner_radius(12).inner_margin(Margin::same(16)).show(ui, |ui| {
                 ui.set_width(ancho);
                 ui.vertical(|ui| {
                 let activo = self.settings.tune_vivo;
@@ -447,28 +489,18 @@ impl StudioApp {
                 }
                 ui.add_space(8.0);
                 self.fila_vivo(ui, cantada, objetivo, acorde, oyendo);
-                if apilado {
-                    // en pantallas chicas el volumen va dentro de la tarjeta
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Volumen").strong());
-                        ui.spacing_mut().slider_width = 200.0;
-                        ui.add(egui::Slider::new(&mut self.settings.vol_escucha, 0.0..=2.0).custom_formatter(|v, _| format!("{:.0} %", v * 100.0)));
-                        ui.add_space(12.0);
-                        perilla(ui, &mut self.settings.pan_escucha, -1.0, 1.0, 0.0, "Paneo", "Mueve tu voz a la izquierda o a la derecha · doble toque: al centro");
-                        perilla(ui, &mut self.settings.reverb_escucha, 0.0, 1.0, 0.0, "Reverb", "Reverberación: tu voz como en una sala · doble toque: sin reverberación");
-                    });
-                }
                 });
-            });
+            }).response.rect.height();
             ui.add_space(12.0);
-            // ---------------- derecha: volumen de la voz (en pantallas chicas va dentro de la tarjeta)
-            if !apilado {
+            // ---------------- derecha: tarjeta de volumen, paneo y reverb de tu voz (igual de alta que NN Tune)
+            Frame::new().fill(Color32::from_gray(27)).stroke(Stroke::new(1.0, LINE)).corner_radius(12).inner_margin(Margin::same(10)).show(ui, |ui| {
             ui.vertical(|ui| {
-                ui.set_width(130.0);
+                ui.set_width(100.0);
+                ui.set_min_height(alto_tune - 22.0);
                 ui.add_space(10.0);
-                // volumen: riel con marcas y perilla blanca
-                let (r, resp) = ui.allocate_exact_size(Vec2::new(130.0, 160.0), Sense::click_and_drag());
+                // volumen: riel con marcas y perilla blanca; se estira para llenar el alto de la tarjeta
+                let alto_riel = (alto_tune - 22.0 - 10.0 - 26.0 - 6.0 - 72.0).max(120.0);
+                let (r, resp) = ui.allocate_exact_size(Vec2::new(100.0, alto_riel), Sense::click_and_drag());
                 let (y0, y1) = (r.top() + 8.0, r.bottom() - 8.0);
                 let maxv = 2.0f32;
                 if resp.dragged() || resp.clicked() {
@@ -496,12 +528,13 @@ impl StudioApp {
                 });
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.spacing_mut().item_spacing.x = 2.0;
                     perilla(ui, &mut self.settings.pan_escucha, -1.0, 1.0, 0.0, "Paneo", "Mueve tu voz a la izquierda o a la derecha · doble clic: al centro");
                     perilla(ui, &mut self.settings.reverb_escucha, 0.0, 1.0, 0.0, "Reverb", "Reverberación: tu voz como en una sala · doble clic: sin reverberación");
                 });
             });
-            }
+            });
+            });
         });
         ui.add_space(4.0);
         ui.label(RichText::new("Lo que grabas se guarda con tu voz natural; si NN Tune está prendido, al terminar se crea además la toma con este efecto (la original queda en «Tomas»).").small().color(DIM));
