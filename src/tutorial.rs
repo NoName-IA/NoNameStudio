@@ -26,20 +26,129 @@ struct Paso {
     accion: Accion,
     /// qué decir cuando ya lo hizo
     bien: &'static str,
+    /// en el teléfono (con los dedos se hace distinto); "" = igual que en la PC
+    texto_cel: &'static str,
+    bien_cel: &'static str,
 }
 
-const PASOS: [Paso; 11] = [
-    Paso { zona: "", titulo: "Bienvenido a NoName Studio", texto: "Vamos a hacer tu primer beat juntos, paso a paso. Te voy a señalar cada parte del programa y tú la vas usando. Toma unos dos minutos.", accion: Accion::Leer, bien: "" },
-    Paso { zona: "kick", titulo: "Pon golpes de bombo", texto: "Esta es la fila del Kick (el bombo). Cada cuadrito es un pedacito del compás. Haz clic en 3 o 4 cuadritos para poner golpes.", accion: Accion::Golpes, bien: "¡Eso es un ritmo! Clic derecho pone un golpe suave y arrastrar hacia arriba o abajo cambia su fuerza." },
-    Paso { zona: "play", titulo: "Escúchalo", texto: "Dale a reproducir (o pulsa Espacio). El patrón se repite en bucle mientras lo editas.", accion: Accion::Reproducir, bien: "Mientras suena puedes seguir agregando golpes en la caja y el hi-hat." },
-    Paso { zona: "melo", titulo: "Abre el Piano Roll", texto: "Ahora una melodía. Toca el nombre NN Wave, el sintetizador, para abrir su Piano Roll.", accion: Accion::AbrirPiano, bien: "Este es el Piano Roll: a la izquierda las teclas, a la derecha el tiempo." },
-    Paso { zona: "roll", titulo: "Escribe notas", texto: "Haz clic en la cuadrícula para poner notas (al menos 3). Arrastra una nota para moverla o desde su borde derecho para alargarla. Clic derecho la borra.", accion: Accion::Notas, bien: "¡Ya tienes melodía! Arriba puedes elegir la escala, poner acordes listos o usar el arpegiador." },
-    Paso { zona: "playlist", titulo: "Arma la canción", texto: "Lo que hiciste quedó guardado en el «Patrón 1». En la Playlist haz clic en un carril para colocar el patrón. Coloca varios uno detrás de otro.", accion: Accion::ColocarPatron, bien: "Cada bloque es tu patrón sonando en ese lugar de la canción. Arrastra los bloques para moverlos." },
-    Paso { zona: "song", titulo: "Escucha la canción completa", texto: "PAT toca solo el patrón; SONG toca toda la canción de la Playlist. Pulsa SONG y luego reproducir.", accion: Accion::Cancion, bien: "Así suena tu canción de principio a fin. Enter cambia entre PAT y SONG." },
-    Paso { zona: "browser", titulo: "Tus propios sonidos", texto: "Abre la pestaña Navegador. Ahí aparecen tus audios: un clic los escucha, doble clic los convierte en instrumento y puedes arrastrarlos a la Playlist.", accion: Accion::AbrirNavegador, bien: "También puedes soltar archivos de audio directamente desde una carpeta de Windows." },
-    Paso { zona: "mixer", titulo: "El Mixer", texto: "Abre el Mixer. Ahí cada canal tiene volumen, paneo, ecualizador (EQ), compresor y efectos.", accion: Accion::AbrirMixer, bien: "El botón Auto de cada canal dibuja cambios en el tiempo; Master deja tu canción a volumen profesional." },
-    Paso { zona: "export", titulo: "Exporta tu canción", texto: "Cuando termines, este botón abre las opciones para guardar tu canción: MP3 para compartir, WAV en calidad completa, pistas separadas por canal o las notas en MIDI. Se guarda en tu Escritorio.", accion: Accion::Leer, bien: "" },
-    Paso { zona: "", titulo: "¡Listo para producir!", texto: "Ya sabes lo básico. Si quieres partir de una base, ve a Archivo > Nuevo desde plantilla y elige un género. Puedes repetir este tutorial en Archivo > Ver tutorial.", accion: Accion::Leer, bien: "" },
+impl Paso {
+    fn texto(&self, movil: bool) -> &'static str {
+        if movil && !self.texto_cel.is_empty() { self.texto_cel } else { self.texto }
+    }
+    fn bien(&self, movil: bool) -> &'static str {
+        if movil && !self.bien_cel.is_empty() { self.bien_cel } else { self.bien }
+    }
+}
+
+const PASOS: [Paso; 12] = [
+    Paso {
+        zona: "",
+        titulo: "Bienvenido a NoName Studio",
+        texto: "Vamos a hacer tu primer beat juntos, paso a paso. Te voy a señalar cada parte del programa y tú la vas usando. Toma unos dos minutos.",
+        accion: Accion::Leer,
+        bien: "",
+        texto_cel: "",
+        bien_cel: "",
+    },
+    Paso {
+        zona: "kick",
+        titulo: "Pon golpes de bombo",
+        texto: "Esta es la fila del Kick (el bombo). Cada cuadrito es un pedacito del compás. Haz clic en 3 o 4 cuadritos para poner golpes.",
+        accion: Accion::Golpes,
+        bien: "¡Eso es un ritmo! Clic derecho pone un golpe suave y arrastrar hacia arriba o abajo cambia su fuerza.",
+        texto_cel: "Esta es la fila del Kick (el bombo). Cada cuadrito es un pedacito del compás. Toca 3 o 4 cuadritos para poner golpes.",
+        bien_cel: "¡Eso es un ritmo! Mantén apretado un cuadrito para un golpe suave. Arrastrar el dedo desliza la vista.",
+    },
+    Paso {
+        zona: "play",
+        titulo: "Escúchalo",
+        texto: "Dale a reproducir (o pulsa Espacio). El patrón se repite en bucle mientras lo editas.",
+        accion: Accion::Reproducir,
+        bien: "Mientras suena puedes seguir agregando golpes en la caja y el hi-hat.",
+        texto_cel: "Dale a reproducir. El patrón se repite en bucle mientras lo editas.",
+        bien_cel: "",
+    },
+    Paso {
+        zona: "melo",
+        titulo: "Abre el Piano Roll",
+        texto: "Ahora una melodía. Toca el nombre NN Wave, el sintetizador, para abrir su Piano Roll.",
+        accion: Accion::AbrirPiano,
+        bien: "Este es el Piano Roll: a la izquierda las teclas, a la derecha el tiempo.",
+        texto_cel: "",
+        bien_cel: "",
+    },
+    Paso {
+        zona: "roll",
+        titulo: "Escribe notas",
+        texto: "Haz clic en la cuadrícula para poner notas (al menos 3). Arrastra una nota para moverla o desde su borde derecho para alargarla. Clic derecho la borra.",
+        accion: Accion::Notas,
+        bien: "¡Ya tienes melodía! Arriba puedes elegir la escala, poner acordes listos o usar el arpegiador.",
+        texto_cel: "Toca la cuadrícula para poner notas (al menos 3). Arrastra una nota para moverla o desde su borde derecho para alargarla. Mantenerla apretada la borra. Arrastrar en el vacío desliza la vista.",
+        bien_cel: "",
+    },
+    Paso {
+        zona: "playlist",
+        titulo: "Arma la canción",
+        texto: "Lo que hiciste quedó guardado en el «Patrón 1». En la Playlist haz doble clic en un carril para colocar el patrón. Coloca varios uno detrás de otro.",
+        accion: Accion::ColocarPatron,
+        bien: "Cada bloque es tu patrón sonando en ese lugar de la canción. Arrástralos para moverlos; clic derecho para copiar, pegar, duplicar y más. Doble clic en un bloque lo edita.",
+        texto_cel: "Lo que hiciste quedó guardado en el «Patrón 1». En la Playlist toca dos veces seguidas un carril para colocar el patrón. Coloca varios uno detrás de otro.",
+        bien_cel: "Arrastrar con un dedo mueve la vista. Para mover un bloque, mantenlo apretado hasta que se levante y arrástralo; si lo sueltas sin moverlo, salen sus opciones (copiar, pegar, duplicar…). Pellizca para acercar o alejar.",
+    },
+    Paso {
+        zona: "song",
+        titulo: "Escucha la canción completa",
+        texto: "PAT toca solo el patrón; SONG toca toda la canción de la Playlist. Pulsa SONG y luego reproducir.",
+        accion: Accion::Cancion,
+        bien: "Así suena tu canción de principio a fin, y la Playlist la va siguiendo. Enter cambia entre PAT y SONG.",
+        texto_cel: "",
+        bien_cel: "Así suena tu canción de principio a fin, y la Playlist la va siguiendo.",
+    },
+    Paso {
+        zona: "browser",
+        titulo: "Tus propios sonidos",
+        texto: "Abre la pestaña Navegador. Ahí aparecen tus audios: un clic los escucha, doble clic los convierte en instrumento y puedes arrastrarlos a la Playlist.",
+        accion: Accion::AbrirNavegador,
+        bien: "También puedes soltar archivos de audio directamente desde una carpeta de Windows.",
+        texto_cel: "Abre la pestaña Navegador. Ahí aparecen tus audios: un toque los escucha, dos toques los convierten en instrumento y puedes arrastrarlos a la Playlist.",
+        bien_cel: "",
+    },
+    Paso {
+        zona: "mixer",
+        titulo: "El Mixer",
+        texto: "Abre el Mixer. Ahí cada canal tiene volumen, paneo, ecualizador (EQ), compresor y efectos.",
+        accion: Accion::AbrirMixer,
+        bien: "El botón Auto de cada canal dibuja cambios en el tiempo; Master deja tu canción a volumen profesional.",
+        texto_cel: "",
+        bien_cel: "",
+    },
+    Paso {
+        zona: "",
+        titulo: "Toca en vivo con los Pads",
+        texto: "En la pestaña Pads (F8) tocas la batería y acordes de la escala en vivo. Elige un kit (Trap 808, Reggaetón, Lo-fi…) y toca varios pads a la vez con el teclado: cada pad muestra su tecla.",
+        accion: Accion::Leer,
+        bien: "",
+        texto_cel: "En la pestaña Pads tocas la batería y acordes de la escala en vivo. Elige un kit (Trap 808, Reggaetón, Lo-fi…) y toca varios pads a la vez con varios dedos.",
+        bien_cel: "",
+    },
+    Paso {
+        zona: "export",
+        titulo: "Exporta tu canción",
+        texto: "Cuando termines, este botón abre las opciones para guardar tu canción: MP3 para compartir, WAV en calidad completa, pistas separadas por canal o las notas en MIDI. Se guarda en tu Escritorio.",
+        accion: Accion::Leer,
+        bien: "",
+        texto_cel: "Cuando termines, este botón abre las opciones para guardar tu canción: MP3 para compartir, WAV en calidad completa, pistas separadas por canal o las notas en MIDI. Se guarda en Música > NoName Studio.",
+        bien_cel: "",
+    },
+    Paso {
+        zona: "",
+        titulo: "¡Listo para producir!",
+        texto: "Ya sabes lo básico. Si quieres partir de una base, ve a Archivo > Nuevo desde plantilla y elige un género. Todos los atajos de teclado se cambian en Ajustes > Teclas. Puedes repetir este tutorial en Archivo > Ver tutorial.",
+        accion: Accion::Leer,
+        bien: "",
+        texto_cel: "Ya sabes lo básico. Si quieres partir de una base, ve a Archivo > Nuevo desde plantilla y elige un género. Puedes repetir este tutorial en Archivo > Ver tutorial.",
+        bien_cel: "",
+    },
 ];
 
 impl StudioApp {
@@ -227,14 +336,14 @@ impl StudioApp {
                 }
                 ui.label(RichText::new(paso.titulo).strong().size(18.0).color(Color32::WHITE));
                 ui.add_space(4.0);
-                ui.label(RichText::new(paso.texto).size(13.5).color(Color32::from_gray(221)));
+                ui.label(RichText::new(paso.texto(self.plat.mobile)).size(13.5).color(Color32::from_gray(221)));
                 if paso.accion != Accion::Leer {
                     ui.add_space(8.0);
                     if hecho {
                         Frame::new().fill(GREEN.gamma_multiply(0.15)).corner_radius(6).inner_margin(Margin::same(8)).show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             ui.label(RichText::new("¡Bien hecho!").strong().color(GREEN));
-                            ui.label(RichText::new(paso.bien).size(13.0).color(Color32::from_rgb(200, 230, 200)));
+                            ui.label(RichText::new(paso.bien(self.plat.mobile)).size(13.0).color(Color32::from_rgb(200, 230, 200)));
                         });
                     } else {
                         ui.label(RichText::new("Hazlo en la parte resaltada para continuar.").italics().size(12.5).color(ACCENT2));

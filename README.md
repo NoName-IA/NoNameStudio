@@ -18,9 +18,23 @@
 **Componer**
 - Channel Rack con secuenciador de pasos, Piano Roll con escalas e imán, arpegiador y swing.
 - Instrumentos propios: batería, bajo, Rhodes, pad, campana, **NN Sampler** y el sintetizador **NN Wave** (12 presets).
-- Plantillas para empezar rápido: Trap, Reggaetón, Boom bap, House, Lo-fi y Drill.
+- 14 golpes de batería sintetizados: Kick, Snare, Clap, Rim, Hi-hat, Open Hat, Tom, Conga, Cowbell, Clave, Snap, Shaker, Ride y Crash.
+- Plantillas para empezar rápido: Trap, Reggaetón, Boom bap, House, Lo-fi, Drill y Trap oscuro.
 - MIDI: teclado en vivo, importar y exportar archivos `.mid`.
 - Plugins **CLAP** como instrumentos y efectos (Windows).
+
+**Pads**
+- Toca la batería en vivo, con repetición de nota al ritmo, y graba lo que tocas en el patrón.
+- Kits por estilo (Boom bap, Trap 808, Reggaetón, House, Lo-fi y Drill) y botón para volver a como estaban.
+- Pad «+» para cargar tus propios audios.
+- Varios pads a la vez: con varios dedos en el teléfono o con el teclado en la PC (cada pad muestra su tecla).
+- Acordes de la escala que suenan mientras los mantienes apretados.
+
+**Playlist**
+- Sigue a la canción mientras suena, deslizándose suave como una cinta.
+- Copiar, cortar, pegar, duplicar, dividir y «hacer único» (el clip con su propio patrón).
+- Moverse fácil: arrastra el fondo, la regla de compases o la columna de pistas, con inercia; zoom centrado donde apuntas.
+- Arrastra un clip al borde y la vista se desplaza sola para llevarlo a cualquier parte.
 
 **Grabar la voz**
 - Escúchate mientras grabas, con nivelador automático, paneo y reverb.
@@ -62,9 +76,44 @@
 - MP3, WAV (16 o 24 bits) y stems (una pista por canal), con normalización opcional.
 
 **Más**
+- Proyectos `.nns` con su propio icono: doble clic en uno y se abre en la app.
 - Panel de letras y notas guardado en el proyecto.
 - Tutorial interactivo la primera vez y copia de rescate si la app se cierra de golpe.
-- Deshacer, versiones del proyecto y ajustes de audio, grabación y exportación.
+- Deshacer, versiones del proyecto y ajustes de audio, grabación, exportación y teclas.
+
+## En la PC
+
+Todos los atajos se cambian en **Ajustes > Teclas**. Los de fábrica:
+
+| Acción | Tecla |
+|---|---|
+| Reproducir / pausar | Espacio |
+| Mover la vista de la Playlist | mantener Espacio y arrastrar (o la rueda apretada) |
+| Detener | Shift + Espacio |
+| Cambiar PAT / SONG | Enter |
+| Grabar | Ctrl + R |
+| Channel Rack · Piano Roll · Mixer · Pads | F5 · F6 · F7 · F8 |
+| Guardar · Guardar como | Ctrl + S · Ctrl + Shift + S |
+| Abrir · Nuevo · Deshacer | Ctrl + O · Ctrl + N · Ctrl + Z |
+| Exportar MP3 · WAV | Ctrl + E · Ctrl + Shift + E |
+| Metrónomo · Bucle · Volver al inicio | M · L · Inicio |
+| Micrófono · Letras · Ajustes | Ctrl + M · Ctrl + L · Ctrl + , |
+| Acercar · Alejar | + · − |
+| Pads 1 a 16 | 1 2 3 4 · Q W E R · A S D F · Z X C V |
+
+En la Playlist: doble clic en un lugar vacío pone el patrón; doble clic en un clip lo edita; clic derecho abre sus opciones; mantener apretada la regla y arrastrar marca el bucle.
+
+## En el teléfono
+
+| Gesto | Qué hace |
+|---|---|
+| Arrastrar con un dedo | Mueve la vista (Playlist, Channel Rack, Piano Roll y Mixer), con inercia |
+| Pellizcar | Acercar o alejar |
+| Mantener apretado un clip | Se levanta: arrástralo para moverlo, o suéltalo para ver sus opciones |
+| Dos toques seguidos | En un lugar vacío pone el patrón; en un clip lo edita |
+| Tocar otra vez la pestaña activa | Vuelve a la Playlist |
+
+Mientras suena, la pantalla no se apaga.
 
 ## Descargar
 
@@ -92,6 +141,7 @@ powershell -File tools\armar.ps1
 ```powershell
 cargo run --example features      # comprueba el motor: afinación, Retune, armonías, pistas, exportación…
 cargo run --example rendimiento   # mide cuánto procesador usa cada proyecto
+cargo run --example convertir -- proyecto.nns.json   # pasa un proyecto viejo al formato .nns
 ```
 
 ## Hecho con
