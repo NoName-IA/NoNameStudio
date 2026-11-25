@@ -32,7 +32,16 @@ mod efectos_view;
 mod teclas;
 #[path = "clips_view.rs"]
 mod clips_view;
+#[path = "roll_extra.rs"]
+mod roll_extra;
+#[path = "roll_cel.rs"]
+mod roll_cel;
 use clips_view::{Barra, ClipCopia, Toque};
+#[path = "pistas.rs"]
+mod pistas;
+#[path = "seleccion.rs"]
+mod seleccion;
+use pistas::PlSel;
 #[path = "retune_view.rs"]
 mod retune_view;
 use retune_view::Retune;
@@ -129,7 +138,32 @@ pub struct StudioApp {
     add_inst: Inst,
     open_set: HashSet<u32>,
     roll_drag: Option<RollDrag>,
+    /// Piano Roll: notas seleccionadas, modo (0 dibujar, 1 seleccionar), zoom, imán, portapapeles,
+    /// menú de una nota (índice, dónde, canal, cuadros abierto), pantalla completa y vista anterior
+    roll_sel: HashSet<usize>,
+    roll_modo: u8,
+    roll_zx: f32,
+    roll_zy: f32,
+    roll_iman: u32,
+    roll_copia: Vec<Note>,
+    roll_menu: Option<(usize, Pos2, u32, u32)>,
+    roll_completo: bool,
+    vista_antes_roll: View,
+    roll_marco: Option<Pos2>,
+    roll_seguir: Option<f32>,
+    /// Piano Roll del teléfono: panel de herramientas, teclado en vivo (octava, dedos y notas sonando)
+    /// y carril de fuerza a la vista
+    roll_panel: bool,
+    roll_teclado: bool,
+    roll_fuerza_cel: bool,
+    roll_octava: i32,
+    roll_dedos: std::collections::HashMap<u64, Pos2>,
+    roll_tocando: std::collections::HashMap<u64, u8>,
     step_drag: Option<(u32, usize)>,
+    /// teléfono: dedo apoyado en un paso (canal, paso, cuándo, dónde) y, tras mantenerlo, ajuste de su
+    /// fuerza deslizando arriba/abajo (canal, paso, fuerza al empezar, dónde empezó)
+    paso_toque: Option<(u32, usize, f64, Pos2)>,
+    paso_fuerza: Option<(u32, usize, f32, Pos2)>,
     roll_x: f32,
     roll_center: bool,
     msg: String,
@@ -237,6 +271,27 @@ pub struct StudioApp {
     pl_paneo_h: bool,
     /// portapapeles de la playlist, toque en curso (teléfono), barrita de acciones y último toque (doble toque)
     pl_copia: Option<ClipCopia>,
+    /// pista o clip elegido en la playlist (los atajos actúan sobre eso)
+    pl_sel: Option<PlSel>,
+    /// más pistas elegidas junto con la de `pl_sel` (Ctrl+clic, Shift+clic o arrastrando sobre las cabeceras)
+    pl_multi: Vec<u32>,
+    /// arrastrando sobre las cabeceras para elegir varias: pista donde empezó
+    pl_rango: Option<u32>,
+    /// arrastrando el cabezal desde su franja (debajo de los números)
+    pl_scrub: bool,
+    /// más clips elegidos junto con el de `pl_sel` (recuadro o Ctrl+clic)
+    pl_clips: Vec<seleccion::ClipRef>,
+    /// cuadro de la playlist elegido para pegar (pista, paso): clic en un lugar vacío lo marca
+    pl_destino: Option<(u32, u32)>,
+    /// lo copiado en la playlist ya dejó su marca en el portapapeles de Windows (sin eso Ctrl+V no llega)
+    copia_sistema: bool,
+    /// la selección se ve un rato y después se desvanece (sigue elegida, invisible):
+    /// cómo era la última vez, cuándo cambió y cuánto se ve ahora (0..1)
+    pl_sel_firma: String,
+    pl_sel_t: f64,
+    pl_sel_vis: f32,
+    /// renombrando una pista: (pista, texto, primer cuadro)
+    pl_renombrar: Option<(u32, String, bool)>,
     pl_toque: Option<Toque>,
     pl_barra: Option<Barra>,
     pl_doble: (f64, Option<(Kind, u32)>),
@@ -366,7 +421,26 @@ impl StudioApp {
             add_inst: Inst::Kick,
             open_set: HashSet::new(),
             roll_drag: None,
+            roll_sel: HashSet::new(),
+            roll_modo: 0,
+            roll_zx: 1.0,
+            roll_zy: 1.0,
+            roll_iman: 1,
+            roll_copia: vec![],
+            roll_menu: None,
+            roll_completo: false,
+            vista_antes_roll: View::Playlist,
+            roll_marco: None,
+            roll_seguir: None,
+            roll_panel: false,
+            roll_teclado: false,
+            roll_fuerza_cel: false,
+            roll_octava: 4,
+            roll_dedos: Default::default(),
+            roll_tocando: Default::default(),
             step_drag: None,
+            paso_toque: None,
+            paso_fuerza: None,
             roll_x: 0.0,
             roll_center: true,
             msg,
@@ -457,6 +531,17 @@ impl StudioApp {
             pl_paneo_h: false,
             tecla_captura: None,
             pl_copia: None,
+            pl_sel: None,
+            pl_multi: vec![],
+            pl_rango: None,
+            pl_scrub: false,
+            pl_clips: vec![],
+            pl_destino: None,
+            copia_sistema: false,
+            pl_sel_firma: String::new(),
+            pl_sel_t: 0.0,
+            pl_sel_vis: 1.0,
+            pl_renombrar: None,
             pl_toque: None,
             pl_barra: None,
             pl_doble: (-10.0, None),
@@ -785,7 +870,7 @@ impl StudioApp {
         if !self.song_mode {
             return Some(pos.rem_euclid(len));
         }
-        self.p.playlist.iter().filter(|c| c.pat == p.id).map(|c| pos - (c.bar * STEPS_PER_BAR) as f64).find(|l| *l >= 0.0 && *l < len)
+        self.p.playlist.iter().filter(|c| c.pat == p.id).map(|c| pos - c.inicio() as f64).find(|l| *l >= 0.0 && *l < len)
     }
 
     // ---------- archivos ----------
@@ -991,6 +1076,8 @@ impl StudioApp {
             self.mano = None;
             return;
         }
+        // borrar, copiar, pegar… sobre la pista o el clip elegido
+        self.atajos_playlist(ctx);
         // Espacio: tocar y soltar = play/pausa; mantener y arrastrar en la playlist = mover la vista.
         // Si play y «mover la vista» tienen la misma tecla, el play se decide al soltar.
         let (play, mano) = (self.atajo("play"), self.atajo("mano"));
@@ -1650,7 +1737,7 @@ impl StudioApp {
             });
         });
         let cur_step = self.local_step().map(|s| s.floor() as usize);
-        let out = egui::ScrollArea::both().id_salt("rack").auto_shrink([false, false]).show(ui, |ui| {
+        let out = egui::ScrollArea::both().id_salt("rack").auto_shrink([false, false]).scroll_source(egui::scroll_area::ScrollSource { drag: if self.paso_fuerza.is_some() { egui::scroll_area::DragScroll::Never } else { egui::scroll_area::DragScroll::OnTouch }, ..Default::default() }).show(ui, |ui| {
             ui.add_space(6.0);
             let ids: Vec<u32> = self.p.channels.iter().map(|c| c.id).collect();
             for id in ids {
@@ -1798,7 +1885,81 @@ impl StudioApp {
                     let l = rect.left() + step_x(i);
                     x >= l && x < l + 23.0
                 });
-                if resp.clicked() || resp.secondary_clicked() {
+                let movil = self.plat.mobile;
+                // si se estaba ajustando la fuerza, al soltar no cuenta como toque (no apaga el paso)
+                let ajustando = movil && self.paso_fuerza.is_some_and(|f| f.0 == id);
+                // teléfono: mantener apretado un paso y deslizar arriba/abajo cambia su fuerza
+                if movil {
+                    let ahora = ui.input(|inp| inp.time);
+                    let abajo = ui.input(|inp| inp.pointer.primary_down());
+                    if self.paso_toque.is_none() && self.paso_fuerza.is_none() && resp.is_pointer_button_down_on() {
+                        if let Some(p0) = ui.input(|inp| inp.pointer.press_origin()) {
+                            if let Some(i) = hit(p0.x) {
+                                self.paso_toque = Some((id, i, ui.input(|inp| inp.pointer.press_start_time()).unwrap_or(ahora), p0));
+                            }
+                        }
+                    }
+                    if let Some((tid, i, t0, p0)) = self.paso_toque {
+                        if tid == id {
+                            let movido = ui.input(|inp| inp.pointer.interact_pos()).is_some_and(|p| (p - p0).length() > 10.0);
+                            if !abajo || movido {
+                                // soltó rápido o empezó a deslizar la vista: no es un ajuste de fuerza
+                                self.paso_toque = None;
+                            } else if ahora - t0 >= 0.35 {
+                                self.paso_toque = None;
+                                self.snap();
+                                let v0 = {
+                                    let pid = self.sel_pat;
+                                    let p = self.p.pattern_mut(pid).unwrap();
+                                    let a = p.steps.entry(id).or_insert_with(|| vec![0.0; n]);
+                                    a.resize(n, 0.0);
+                                    if a[i] <= 0.0 {
+                                        a[i] = 0.85;
+                                    }
+                                    a[i]
+                                };
+                                self.paso_fuerza = Some((id, i, v0, p0));
+                                self.preview(id, if c.inst == Inst::Sampler { c.smp.root } else { 60 }, v0);
+                                #[cfg(target_os = "android")]
+                                audio::vibrar();
+                                self.send();
+                            } else {
+                                ui.ctx().request_repaint_after(Duration::from_millis(30));
+                            }
+                        }
+                    }
+                    if let Some((fid, i, v0, p0)) = self.paso_fuerza {
+                        if fid == id {
+                            if abajo {
+                                if let Some(p) = ui.input(|inp| inp.pointer.interact_pos()) {
+                                    // 150 puntos de recorrido = de 0 a 100 %: más fino que la altura del paso
+                                    let v = (v0 - (p.y - p0.y) / 150.0).clamp(0.05, 1.0);
+                                    let v = (v * 100.0).round() / 100.0;
+                                    let pid = self.sel_pat;
+                                    if let Some(a) = self.p.pattern_mut(pid).and_then(|pp| pp.steps.get_mut(&id)) {
+                                        if (a[i] - v).abs() > 0.001 {
+                                            a[i] = v;
+                                            self.cmd(Cmd::Project(Box::new(self.p.clone())));
+                                        }
+                                    }
+                                    self.msg = format!("{} paso {}: fuerza {:.0}%", c.name, i + 1, v * 100.0);
+                                    // burbuja con el porcentaje encima del paso
+                                    let r = Rect::from_min_size(Pos2::new(rect.left() + step_x(i), rect.top()), Vec2::new(22.0, 28.0));
+                                    let burbuja = Rect::from_center_size(Pos2::new(r.center().x, r.top() - 26.0), Vec2::new(64.0, 30.0));
+                                    let pt = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("fuerza_paso")));
+                                    pt.rect_filled(burbuja, 10, Color32::from_gray(235));
+                                    pt.text(burbuja.center(), Align2::CENTER_CENTER, format!("{:.0}%", v * 100.0), FontId::proportional(15.0), Color32::from_gray(20));
+                                    pt.rect_stroke(r.expand(2.0), 5, Stroke::new(2.0, Color32::WHITE), StrokeKind::Outside);
+                                }
+                                ui.ctx().request_repaint();
+                            } else {
+                                self.paso_fuerza = None;
+                                self.send();
+                            }
+                        }
+                    }
+                }
+                if (resp.clicked() || (resp.secondary_clicked() && !movil)) && !ajustando {
                     if let Some(i) = resp.interact_pointer_pos().and_then(|p| hit(p.x)) {
                         self.snap();
                         let soft = resp.secondary_clicked();
@@ -1991,12 +2152,203 @@ impl StudioApp {
 
     // ---------- piano roll ----------
     fn roll(&mut self, ui: &mut Ui) {
+        let (cw, rh) = (self.cw(), self.rh());
         let melodic = self.melodic();
         let rc = self.roll_ch();
+        if self.roll_es_completo() && !self.roll_cel() {
+            self.roll_cabecera(ui);
+        }
+        let cel = self.roll_cel();
+        if !cel {
+            self.roll_barra(ui);
+        } else {
+            // teléfono: barra de transporte abajo y herramientas en el panel lateral
+            self.roll_transporte(ui);
+        }
+        let Some(ch) = rc else {
+            ui.centered_and_justified(|ui| ui.label("Agrega un canal melódico (Rhodes, Pad, Sub Bass, Campana, NN Wave, NN Sampler o un plugin) en el Channel Rack."));
+            return;
+        };
+        if cel {
+            if self.roll_teclado {
+                let alto = (ui.available_height() * 0.42).max(150.0);
+                egui::Panel::bottom("roll_teclado").exact_size(alto).frame(Frame::new().fill(Color32::from_gray(14)).inner_margin(Margin::symmetric(6, 4))).show(ui, |ui| self.roll_teclado_vivo(ui, ch));
+            } else if !self.roll_tocando.is_empty() {
+                self.roll_teclado_soltar(ch);
+            }
+            let mut abierto = self.roll_panel;
+            egui::Panel::right("roll_herramientas")
+                .exact_size(300.0)
+                .resizable(false)
+                .frame(Frame::new().fill(PANEL2).inner_margin(Margin::same(10)).stroke(Stroke::new(1.0, Color32::from_gray(60))))
+                .show_collapsible(ui, &mut abierto, |ui| {
+                    egui::ScrollArea::vertical().id_salt("roll_herr_scroll").show(ui, |ui| {
+                        ui.label(RichText::new("HERRAMIENTAS").small().strong().color(DIM));
+                        self.roll_barra(ui);
+                    });
+                });
+            self.roll_panel = abierto && self.roll_panel;
+        }
+        self.roll_barra_seleccion(ui, ch);
+        if !cel || self.roll_fuerza_cel {
+            egui::Panel::bottom("vel").exact_size(74.0).frame(Frame::new().fill(BG)).show(ui, |ui| self.velocity_lane(ui, ch));
+        }
+        let area_rejilla = egui::CentralPanel::default().frame(Frame::new().fill(PANEL)).show(ui, |ui| {
+            self.tut_mark("roll", ui.max_rect());
+            let pat = self.cur_pat().clone();
+            let steps = pat.len_steps();
+            let rows = (HIGH - LOW + 1) as f32;
+            let mut sa = egui::ScrollArea::both().id_salt(("roll", pat.id)).auto_shrink([false, false]);
+            if let Some(x) = self.roll_seguir.take() {
+                sa = sa.horizontal_scroll_offset(x.max(0.0));
+            }
+            // seleccionando con recuadro, arrastrar no desliza la vista
+            if self.roll_modo == 1 || self.roll_marco.is_some() {
+                sa = sa.scroll_source(egui::scroll_area::ScrollSource { drag: egui::scroll_area::DragScroll::Never, ..Default::default() });
+            }
+            if self.roll_center {
+                let ns = pat.notes.get(&ch).cloned().unwrap_or_default();
+                let mid = if ns.is_empty() { 60.0 } else { ns.iter().map(|n| n.m as f32).sum::<f32>() / ns.len() as f32 };
+                sa = sa.vertical_scroll_offset(((HIGH as f32 - mid) * rh - ui.available_height() / 2.0).max(0.0));
+                self.roll_center = false;
+            }
+            let out = sa.show_viewport(ui, |ui, vp| {
+                if cel {
+                    // espacio para la regla de compases
+                    ui.add_space(24.0);
+                }
+                let size = Vec2::new(KW + steps as f32 * cw, rows * rh);
+                // teléfono: arrastrar en el vacío desliza la vista; arrastrar una nota la mueve o la alarga
+                let sentido = if self.plat.mobile {
+                    let previo = Rect::from_min_size(ui.cursor().min, size);
+                    let sobre_nota = ui.input(|i| i.pointer.press_origin()).is_some_and(|p| {
+                        pat.notes.get(&ch).is_some_and(|ns| {
+                            ns.iter().any(|n| {
+                                let x = previo.left() + KW + n.s as f32 * cw;
+                                let y = previo.top() + (HIGH.saturating_sub(n.m)) as f32 * rh;
+                                Rect::from_min_size(Pos2::new(x, y), Vec2::new((n.l as f32 * cw).max(8.0), rh)).expand(6.0).contains(p)
+                            })
+                        })
+                    });
+                    if sobre_nota || self.roll_modo == 1 { Sense::click_and_drag() } else { Sense::click() }
+                } else {
+                    Sense::click_and_drag()
+                };
+                let (rect, resp) = ui.allocate_exact_size(size, sentido);
+                let painter = ui.painter_at(rect);
+                let gx = rect.left() + KW;
+                let row_y = |m: u8| rect.top() + (HIGH - m) as f32 * rh;
+                let key = self.p.key;
+                for m in LOW..=HIGH {
+                    let y = row_y(m);
+                    let pc = (m % 12) as usize;
+                    let col = if self.p.in_scale(m as i32) {
+                        if pc == key as usize % 12 { Color32::from_gray(62) } else { Color32::from_gray(44) }
+                    } else if is_black(m) {
+                        Color32::from_gray(25)
+                    } else {
+                        Color32::from_gray(30)
+                    };
+                    painter.rect_filled(Rect::from_min_size(Pos2::new(gx, y), Vec2::new(steps as f32 * cw, rh)), 0, col);
+                    painter.hline(gx..=rect.right(), y + rh - 0.5, Stroke::new(1.0, Color32::from_gray(24)));
+                }
+                for s in 0..=steps {
+                    let x = gx + s as f32 * cw;
+                    let (w, c) = if s % 16 == 0 { (2.0, Color32::from_gray(12)) } else if s % 4 == 0 { (1.0, Color32::from_gray(22)) } else { (1.0, Color32::from_gray(29)) };
+                    painter.vline(x, rect.top()..=rect.bottom(), Stroke::new(w, c));
+                }
+                // notas fantasma de otros canales
+                for (oid, ns) in &pat.notes {
+                    if *oid == ch {
+                        continue;
+                    }
+                    for n in ns.iter().filter(|n| n.m >= LOW && n.m <= HIGH) {
+                        painter.rect_filled(Rect::from_min_size(Pos2::new(gx + n.s as f32 * cw + 1.0, row_y(n.m) + 1.0), Vec2::new(n.l as f32 * cw - 2.0, rh - 2.0)), 2, Color32::from_white_alpha(16));
+                    }
+                }
+                let ns = pat.notes.get(&ch).cloned().unwrap_or_default();
+                for n in ns.iter().filter(|n| n.m >= LOW && n.m <= HIGH) {
+                    let r = Rect::from_min_size(Pos2::new(gx + n.s as f32 * cw + 1.0, row_y(n.m) + 1.0), Vec2::new(n.l as f32 * cw - 2.0, rh - 2.0));
+                    let a = (0.45 + 0.55 * n.v).clamp(0.0, 1.0);
+                    painter.rect_filled(r, 2, c32(pat.color).gamma_multiply(a));
+                    if ns.iter().position(|x| std::ptr::eq(x, n)).is_some_and(|i| self.roll_sel.contains(&i)) {
+                        painter.rect_stroke(r, 2, Stroke::new(2.0, Color32::WHITE), StrokeKind::Outside);
+                    }
+                    painter.rect_filled(Rect::from_min_max(Pos2::new(r.right() - 4.0, r.top() + 1.0), Pos2::new(r.right() - 1.0, r.bottom() - 1.0)), 1, Color32::from_black_alpha(130));
+                    if r.width() > 34.0 {
+                        painter.text(r.left_center() + Vec2::new(3.0, 0.0), Align2::LEFT_CENTER, nname(n.m), FontId::proportional(9.0), Color32::from_gray(13));
+                    }
+                }
+                if let Some(ls) = self.local_step() {
+                    let x = gx + ls as f32 * cw;
+                    painter.vline(x, rect.top()..=rect.bottom(), Stroke::new(2.0, ACCENT2));
+                    if self.playing() && self.roll_drag.is_none() && self.roll_marco.is_none() {
+                        let izq = rect.left() + vp.min.x + KW;
+                        let ancho = (vp.width() - KW).max(50.0);
+                        if x < izq || x > izq + ancho * 0.85 {
+                            self.roll_seguir = Some(x - rect.left() - KW - ancho * 0.1);
+                            ui.ctx().request_repaint();
+                        }
+                    }
+                }
+                // recuadro de selección
+                if let (Some(a), Some(b)) = (self.roll_marco, ui.input(|i| i.pointer.interact_pos())) {
+                    let r = Rect::from_two_pos(a, b);
+                    painter.rect_filled(r, 2, Color32::from_white_alpha(18));
+                    painter.rect_stroke(r, 2, Stroke::new(1.0, Color32::from_white_alpha(170)), StrokeKind::Inside);
+                }
+                // teclado fijo a la izquierda
+                let kx = rect.left() + vp.min.x;
+                for m in LOW..=HIGH {
+                    let y = row_y(m);
+                    let r = Rect::from_min_size(Pos2::new(kx, y), Vec2::new(KW, rh));
+                    painter.rect_filled(r, 0, if is_black(m) { Color32::from_gray(22) } else { Color32::from_rgb(232, 232, 232) });
+                    painter.hline(kx..=kx + KW, y + rh - 0.5, Stroke::new(1.0, Color32::from_black_alpha(80)));
+                    if self.p.in_scale(m as i32) {
+                        painter.rect_filled(Rect::from_min_size(Pos2::new(kx + KW - 5.0, y), Vec2::new(5.0, rh)), 0, if m % 12 == key % 12 { ACCENT } else { ACCENT.gamma_multiply(0.4) });
+                    }
+                    // nombres en el teclado: todas las blancas si hay lugar; si no, solo Do y la tónica
+                    if m % 12 == 0 || m % 12 == key % 12 || (rh >= 12.0 && !is_black(m)) {
+                        let nombre = if m % 12 == 0 || is_black(m) { nname(m) } else { nname(m).trim_end_matches(|c: char| c.is_ascii_digit() || c == '-').to_string() };
+                        painter.text(Pos2::new(kx + 4.0, y + rh / 2.0), Align2::LEFT_CENTER, nombre, FontId::proportional((rh * 0.72).clamp(8.0, 12.0)), if is_black(m) { Color32::LIGHT_GRAY } else { Color32::from_gray(29) });
+                    }
+                }
+                if cel {
+                    self.roll_regla(&ui.painter().clone(), rect, vp, gx, cw, steps);
+                }
+                self.roll_input(ui, &resp, rect, kx, ch, steps);
+                // zoom con Ctrl + rueda (PC) o pellizco (teléfono)
+                if resp.hovered() || ui.input(|i| i.multi_touch()).is_some() {
+                    let z = ui.input(|i| i.zoom_delta());
+                    if (z - 1.0).abs() > 1e-3 {
+                        self.roll_zx = (self.roll_zx * z).clamp(0.4, 3.0);
+                    }
+                }
+            });
+            self.roll_x = out.state.offset().x;
+        })
+        .response
+        .rect;
+        if cel {
+            // pestaña en el borde derecho para abrir/cerrar las herramientas
+            let ctx = ui.ctx().clone();
+            self.roll_pestana(&ctx, area_rejilla);
+        }
+    }
+
+    /// Herramientas del Piano Roll (arriba en la PC; en el panel lateral en el teléfono).
+    fn roll_barra(&mut self, ui: &mut Ui) {
+        let melodic = self.melodic();
+        let rc = self.roll_ch();
+        // en el panel lateral del teléfono: un grupo por fila
+        let filas = self.roll_cel();
         Frame::new().fill(PANEL2).inner_margin(Margin::symmetric(10, 6)).show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 let chn = rc.and_then(|id| self.p.channel(id)).map(|c| c.name.clone()).unwrap_or_default();
                 ui.label(RichText::new(format!("Piano Roll — {} · {}", self.cur_pat().name, chn)).strong());
+                if filas {
+                    ui.end_row();
+                }
                 ui.label(RichText::new("CANAL").small().color(DIM));
                 let mut sel = self.sel_ch;
                 egui::ComboBox::from_id_salt("rollch").width(110.0).selected_text(chn.clone()).show_ui(ui, |ui| {
@@ -2007,6 +2359,29 @@ impl StudioApp {
                 if sel != self.sel_ch {
                     self.sel_ch = sel;
                     self.roll_center = true;
+                    self.roll_sel.clear();
+                }
+                if filas {
+                    ui.end_row();
+                }
+                // modo: dibujar notas o seleccionar con un recuadro
+                for (m, t, ayuda) in [(0u8, "Dibujar", "Tocar pone notas; arrastrar una nota la mueve"), (1, "Seleccionar", "Arrastra un recuadro para seleccionar notas; tocar una la agrega o la quita")] {
+                    if ui.add(egui::Button::selectable(self.roll_modo == m, t)).on_hover_text(ayuda).clicked() {
+                        self.roll_modo = m;
+                    }
+                }
+                if filas {
+                    ui.end_row();
+                }
+                ui.label(RichText::new("REJILLA").small().color(DIM)).on_hover_text("Las notas se ponen, se mueven y se alargan de a este tamaño");
+                let im = roll_extra::IMANES.iter().find(|x| x.0 == self.roll_iman).map(|x| x.1).unwrap_or("1/16");
+                egui::ComboBox::from_id_salt("iman").width(80.0).selected_text(im).show_ui(ui, |ui| {
+                    for (v, n) in roll_extra::IMANES {
+                        ui.selectable_value(&mut self.roll_iman, v, n);
+                    }
+                });
+                if filas {
+                    ui.end_row();
                 }
                 ui.label(RichText::new("HERRAMIENTA").small().color(DIM));
                 egui::ComboBox::from_id_salt("tool").width(190.0).selected_text(CHORDS[self.tool].0).show_ui(ui, |ui| {
@@ -2014,6 +2389,9 @@ impl StudioApp {
                         ui.selectable_value(&mut self.tool, i, *n);
                     }
                 });
+                if filas {
+                    ui.end_row();
+                }
                 ui.label(RichText::new("DURACIÓN").small().color(DIM));
                 let lens = [(1, "1/16"), (2, "1/8"), (4, "1/4"), (8, "1/2"), (16, "1 compás")];
                 let cur = lens.iter().find(|l| l.0 == self.note_len).map(|l| l.1).unwrap_or("…");
@@ -2025,9 +2403,43 @@ impl StudioApp {
                 ui.label(RichText::new("VEL").small().color(DIM));
                 ui.spacing_mut().slider_width = 70.0;
                 ui.add(egui::Slider::new(&mut self.note_vel, 0.1..=1.0).show_value(false));
+                if filas {
+                    ui.end_row();
+                }
                 self.scale_picker(ui);
+                if filas {
+                    ui.end_row();
+                }
+                if ui.button("Adivinar escala").on_hover_text("Elige la tonalidad y la escala que mejor calzan con las notas del patrón").clicked() {
+                    self.adivinar_escala();
+                }
                 if let Some(id) = rc {
                     self.roll_tools(ui, id);
+                }
+                if filas {
+                    ui.end_row();
+                }
+                // zoom de lado y de alto
+                ui.label(RichText::new("ANCHO").small().color(DIM));
+                if ui.small_button("−").on_hover_text("Alejar de lado").clicked() {
+                    self.roll_zx = (self.roll_zx / 1.25).max(0.4);
+                }
+                if ui.small_button("+").on_hover_text("Acercar de lado").clicked() {
+                    self.roll_zx = (self.roll_zx * 1.25).min(3.0);
+                }
+                if filas {
+                    ui.end_row();
+                }
+                ui.label(RichText::new("ALTO").small().color(DIM));
+                if ui.small_button("−").on_hover_text("Filas más bajas").clicked() {
+                    self.roll_zy = (self.roll_zy / 1.2).max(0.6);
+                }
+                if ui.small_button("+").on_hover_text("Filas más altas").clicked() {
+                    self.roll_zy = (self.roll_zy * 1.2).min(2.5);
+                }
+
+                if filas {
+                    ui.end_row();
                 }
                 let mr = self.midi_rec;
                 if ui.add(egui::Button::selectable(mr, if mr { "Grabando MIDI" } else { "Grabar MIDI" })).on_hover_text("Con el patrón sonando, lo que toques en el teclado MIDI se escribe aquí").clicked() {
@@ -2045,109 +2457,12 @@ impl StudioApp {
                 }
             });
         });
-        let Some(ch) = rc else {
-            ui.centered_and_justified(|ui| ui.label("Agrega un canal melódico (Rhodes, Pad, Sub Bass, Campana, NN Wave, NN Sampler o un plugin) en el Channel Rack."));
-            return;
-        };
-        egui::Panel::bottom("vel").exact_size(74.0).frame(Frame::new().fill(BG)).show(ui, |ui| self.velocity_lane(ui, ch));
-        egui::CentralPanel::default().frame(Frame::new().fill(PANEL)).show(ui, |ui| {
-            self.tut_mark("roll", ui.max_rect());
-            let pat = self.cur_pat().clone();
-            let steps = pat.len_steps();
-            let rows = (HIGH - LOW + 1) as f32;
-            let mut sa = egui::ScrollArea::both().id_salt(("roll", pat.id)).auto_shrink([false, false]);
-            if self.roll_center {
-                let ns = pat.notes.get(&ch).cloned().unwrap_or_default();
-                let mid = if ns.is_empty() { 60.0 } else { ns.iter().map(|n| n.m as f32).sum::<f32>() / ns.len() as f32 };
-                sa = sa.vertical_scroll_offset(((HIGH as f32 - mid) * RH - ui.available_height() / 2.0).max(0.0));
-                self.roll_center = false;
-            }
-            let out = sa.show_viewport(ui, |ui, vp| {
-                let size = Vec2::new(KW + steps as f32 * CW, rows * RH);
-                // teléfono: arrastrar en el vacío desliza la vista; arrastrar una nota la mueve o la alarga
-                let sentido = if self.plat.mobile {
-                    let previo = Rect::from_min_size(ui.cursor().min, size);
-                    let sobre_nota = ui.input(|i| i.pointer.press_origin()).is_some_and(|p| {
-                        pat.notes.get(&ch).is_some_and(|ns| {
-                            ns.iter().any(|n| {
-                                let x = previo.left() + KW + n.s as f32 * CW;
-                                let y = previo.top() + (HIGH.saturating_sub(n.m)) as f32 * RH;
-                                Rect::from_min_size(Pos2::new(x, y), Vec2::new((n.l as f32 * CW).max(8.0), RH)).expand(6.0).contains(p)
-                            })
-                        })
-                    });
-                    if sobre_nota { Sense::click_and_drag() } else { Sense::click() }
-                } else {
-                    Sense::click_and_drag()
-                };
-                let (rect, resp) = ui.allocate_exact_size(size, sentido);
-                let painter = ui.painter_at(rect);
-                let gx = rect.left() + KW;
-                let row_y = |m: u8| rect.top() + (HIGH - m) as f32 * RH;
-                let key = self.p.key;
-                for m in LOW..=HIGH {
-                    let y = row_y(m);
-                    let pc = (m % 12) as usize;
-                    let col = if self.p.in_scale(m as i32) {
-                        if pc == key as usize % 12 { Color32::from_gray(62) } else { Color32::from_gray(44) }
-                    } else if is_black(m) {
-                        Color32::from_gray(25)
-                    } else {
-                        Color32::from_gray(30)
-                    };
-                    painter.rect_filled(Rect::from_min_size(Pos2::new(gx, y), Vec2::new(steps as f32 * CW, RH)), 0, col);
-                    painter.hline(gx..=rect.right(), y + RH - 0.5, Stroke::new(1.0, Color32::from_gray(24)));
-                }
-                for s in 0..=steps {
-                    let x = gx + s as f32 * CW;
-                    let (w, c) = if s % 16 == 0 { (2.0, Color32::from_gray(12)) } else if s % 4 == 0 { (1.0, Color32::from_gray(22)) } else { (1.0, Color32::from_gray(29)) };
-                    painter.vline(x, rect.top()..=rect.bottom(), Stroke::new(w, c));
-                }
-                // notas fantasma de otros canales
-                for (oid, ns) in &pat.notes {
-                    if *oid == ch {
-                        continue;
-                    }
-                    for n in ns.iter().filter(|n| n.m >= LOW && n.m <= HIGH) {
-                        painter.rect_filled(Rect::from_min_size(Pos2::new(gx + n.s as f32 * CW + 1.0, row_y(n.m) + 1.0), Vec2::new(n.l as f32 * CW - 2.0, RH - 2.0)), 2, Color32::from_white_alpha(16));
-                    }
-                }
-                let ns = pat.notes.get(&ch).cloned().unwrap_or_default();
-                for n in ns.iter().filter(|n| n.m >= LOW && n.m <= HIGH) {
-                    let r = Rect::from_min_size(Pos2::new(gx + n.s as f32 * CW + 1.0, row_y(n.m) + 1.0), Vec2::new(n.l as f32 * CW - 2.0, RH - 2.0));
-                    let a = (0.45 + 0.55 * n.v).clamp(0.0, 1.0);
-                    painter.rect_filled(r, 2, c32(pat.color).gamma_multiply(a));
-                    painter.rect_filled(Rect::from_min_max(Pos2::new(r.right() - 4.0, r.top() + 1.0), Pos2::new(r.right() - 1.0, r.bottom() - 1.0)), 1, Color32::from_black_alpha(130));
-                    if r.width() > 34.0 {
-                        painter.text(r.left_center() + Vec2::new(3.0, 0.0), Align2::LEFT_CENTER, nname(n.m), FontId::proportional(9.0), Color32::from_gray(13));
-                    }
-                }
-                if let Some(ls) = self.local_step() {
-                    painter.vline(gx + ls as f32 * CW, rect.top()..=rect.bottom(), Stroke::new(2.0, ACCENT2));
-                }
-                // teclado fijo a la izquierda
-                let kx = rect.left() + vp.min.x;
-                for m in LOW..=HIGH {
-                    let y = row_y(m);
-                    let r = Rect::from_min_size(Pos2::new(kx, y), Vec2::new(KW, RH));
-                    painter.rect_filled(r, 0, if is_black(m) { Color32::from_gray(22) } else { Color32::from_rgb(232, 232, 232) });
-                    painter.hline(kx..=kx + KW, y + RH - 0.5, Stroke::new(1.0, Color32::from_black_alpha(80)));
-                    if self.p.in_scale(m as i32) {
-                        painter.rect_filled(Rect::from_min_size(Pos2::new(kx + KW - 5.0, y), Vec2::new(5.0, RH)), 0, if m % 12 == key % 12 { ACCENT } else { ACCENT.gamma_multiply(0.4) });
-                    }
-                    if m % 12 == 0 || m % 12 == key % 12 {
-                        painter.text(Pos2::new(kx + 4.0, y + RH / 2.0), Align2::LEFT_CENTER, nname(m), FontId::proportional(9.5), if is_black(m) { Color32::LIGHT_GRAY } else { Color32::from_gray(29) });
-                    }
-                }
-                self.roll_input(ui, &resp, rect, kx, ch, steps);
-            });
-            self.roll_x = out.state.offset().x;
-        });
     }
 
     fn roll_input(&mut self, ui: &Ui, resp: &Response, rect: Rect, kx: f32, ch: u32, steps: u32) {
+        let (cw, rh) = (self.cw(), self.rh());
         let gx = rect.left() + KW;
-        let at = |p: Pos2| -> (f32, u8) { ((p.x - gx) / CW, (HIGH as i32 - ((p.y - rect.top()) / RH).floor() as i32).clamp(LOW as i32, HIGH as i32) as u8) };
+        let at = |p: Pos2| -> (f32, u8) { ((p.x - gx) / cw, (HIGH as i32 - ((p.y - rect.top()) / rh).floor() as i32).clamp(LOW as i32, HIGH as i32) as u8) };
         let pid = self.sel_pat;
         let hit = |ns: &[Note], fx: f32, m: u8| ns.iter().rposition(|n| n.m == m && fx >= n.s as f32 && fx < (n.s + n.l) as f32);
         let on_keys = |p: Pos2| p.x < kx + KW;
@@ -2160,7 +2475,19 @@ impl StudioApp {
                 }
             }
         }
-        if resp.secondary_clicked() {
+        // menú de la nota: doble clic (PC) o mantener apretada (teléfono)
+        let abrir_menu = resp.double_clicked() || (self.plat.mobile && resp.secondary_clicked());
+        if abrir_menu {
+            if let Some(p) = resp.interact_pointer_pos() {
+                let (fx, m) = at(p);
+                let ns = self.p.pattern(pid).and_then(|pp| pp.notes.get(&ch)).cloned().unwrap_or_default();
+                if let Some(i) = hit(&ns, fx, m) {
+                    self.roll_menu = Some((i, p, ch, 0));
+                    return;
+                }
+            }
+        }
+        if resp.secondary_clicked() && !self.plat.mobile {
             if let Some(p) = resp.interact_pointer_pos() {
                 let (fx, m) = at(p);
                 let ns = self.p.pattern(pid).and_then(|pp| pp.notes.get(&ch)).cloned().unwrap_or_default();
@@ -2169,10 +2496,70 @@ impl StudioApp {
                     if let Some(v) = self.p.pattern_mut(pid).and_then(|pp| pp.notes.get_mut(&ch)) {
                         v.remove(i);
                     }
+                    self.roll_sel.clear();
                     self.send();
                 }
             }
             return;
+        }
+        if resp.secondary_clicked() {
+            return;
+        }
+        // modo seleccionar: recuadro, y tocar una nota la agrega o la quita
+        if self.roll_modo == 1 {
+            let ns = self.p.pattern(pid).and_then(|pp| pp.notes.get(&ch)).cloned().unwrap_or_default();
+            if resp.clicked() {
+                if let Some(p) = resp.interact_pointer_pos() {
+                    let (fx, m) = at(p);
+                    match hit(&ns, fx, m) {
+                        Some(i) => {
+                            if !self.roll_sel.remove(&i) {
+                                self.roll_sel.insert(i);
+                            }
+                        }
+                        None => self.roll_sel.clear(),
+                    }
+                }
+                return;
+            }
+            if resp.drag_started() {
+                if let Some(p) = ui.input(|i| i.pointer.press_origin()) {
+                    let (fx, m) = at(p);
+                    match hit(&ns, fx, m) {
+                        // arrastrar una nota seleccionada mueve toda la selección
+                        Some(i) => {
+                            if !self.roll_sel.contains(&i) {
+                                self.roll_sel = [i].into_iter().collect();
+                            }
+                            self.snap();
+                            let idx: Vec<usize> = self.roll_sel_validos(ch);
+                            let orig = idx.iter().map(|&k| (ns[k].s, ns[k].m)).collect();
+                            self.roll_drag = Some(RollDrag::Move { idx, orig, s0: fx.floor() as i32, m0: m as i32 });
+                        }
+                        None => self.roll_marco = Some(p),
+                    }
+                }
+            }
+            if let Some(a) = self.roll_marco {
+                if resp.drag_stopped() || !ui.input(|i| i.pointer.any_down()) {
+                    if let Some(b) = ui.input(|i| i.pointer.interact_pos()) {
+                        let r = Rect::from_two_pos(a, b);
+                        let gx0 = rect.left() + KW;
+                        self.roll_sel = ns
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, n)| {
+                                let nr = Rect::from_min_size(Pos2::new(gx0 + n.s as f32 * cw, rect.top() + (HIGH.saturating_sub(n.m)) as f32 * rh), Vec2::new(n.l as f32 * cw, rh));
+                                nr.intersects(r)
+                            })
+                            .map(|(i, _)| i)
+                            .collect();
+                        self.msg = format!("{} notas seleccionadas.", self.roll_sel.len());
+                    }
+                    self.roll_marco = None;
+                }
+                return;
+            }
         }
         let begin = |this: &mut Self, p: Pos2, dragging: bool| {
             let (fx, m) = at(p);
@@ -2190,11 +2577,16 @@ impl StudioApp {
                 let n = ns[i];
                 if dragging {
                     let near_end = fx > (n.s + n.l) as f32 - 0.35;
-                    this.roll_drag = Some(if near_end { RollDrag::Resize { idx: vec![i] } } else { RollDrag::Move { idx: vec![i], orig: vec![(n.s, n.m)], s0: fx.floor() as i32, m0: m as i32 } });
+                    let grupo: Vec<usize> = if this.roll_sel.contains(&i) { let mut v: Vec<usize> = this.roll_sel.iter().copied().filter(|k| *k < ns.len()).collect(); v.sort(); v } else { vec![i] };
+                    let orig = grupo.iter().map(|&k| (ns[k].s, ns[k].m)).collect();
+                    this.roll_drag = Some(if near_end { RollDrag::Resize { idx: grupo } } else { RollDrag::Move { idx: grupo, orig, s0: fx.floor() as i32, m0: m as i32 } });
                 }
                 this.preview(ch, n.m, n.v);
             } else {
-                let s = fx.floor() as u32;
+                // la nota nueva cae en el imán
+                let iman = this.roll_iman.max(1);
+                let s = (fx.floor() as u32) / iman * iman;
+                this.roll_sel.clear();
                 let start = ns.len();
                 let base = proj.as_ref().map(|p| p.snap_scale(m as i32)).unwrap_or(m as i32);
                 for d in CHORDS[tool].1 {
@@ -2232,7 +2624,9 @@ impl StudioApp {
             if let Some(ns) = self.p.pattern_mut(pid).and_then(|pp| pp.notes.get_mut(&ch)) {
                 match d {
                     RollDrag::Move { idx, orig, s0, m0 } => {
-                        let ds = fx.floor() as i32 - s0;
+                        // se mueve de a un imán
+                        let iman = self.roll_iman.max(1) as i32;
+                        let ds = ((fx.floor() as i32 - s0) as f32 / iman as f32).round() as i32 * iman;
                         let dm = m as i32 - m0;
                         for (k, &i) in idx.iter().enumerate() {
                             if let Some(n) = ns.get_mut(i) {
@@ -2242,9 +2636,10 @@ impl StudioApp {
                         }
                     }
                     RollDrag::Resize { idx } => {
+                        let iman = self.roll_iman.max(1) as f32;
                         for &i in idx {
                             if let Some(n) = ns.get_mut(i) {
-                                n.l = ((fx - n.s as f32).round().max(1.0) as u32).min(steps - n.s);
+                                n.l = ((((fx - n.s as f32) / iman).round() * iman).max(1.0) as u32).min(steps - n.s);
                             }
                         }
                     }
@@ -2267,6 +2662,7 @@ impl StudioApp {
     }
 
     fn velocity_lane(&mut self, ui: &mut Ui, ch: u32) {
+        let cw = self.cw();
         let (rect, resp) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0, BG);
@@ -2275,14 +2671,14 @@ impl StudioApp {
         let gx = rect.left() + KW - self.roll_x;
         let h = rect.height() - 10.0;
         for s in (0..=pat.len_steps()).step_by(4) {
-            let x = gx + s as f32 * CW;
+            let x = gx + s as f32 * cw;
             if x > rect.left() + KW {
                 painter.vline(x, rect.top()..=rect.bottom(), Stroke::new(1.0, if s % 16 == 0 { Color32::from_gray(12) } else { Color32::from_gray(31) }));
             }
         }
         if let Some(ns) = pat.notes.get(&ch) {
             for n in ns {
-                let x = gx + n.s as f32 * CW + CW / 2.0;
+                let x = gx + n.s as f32 * cw + cw / 2.0;
                 if x < rect.left() + KW {
                     continue;
                 }
@@ -2299,7 +2695,7 @@ impl StudioApp {
         if resp.dragged() || resp.clicked() {
             if let Some(p) = resp.interact_pointer_pos() {
                 if p.x > rect.left() + KW {
-                    let s = ((p.x - gx) / CW).floor() as i64;
+                    let s = ((p.x - gx) / cw).floor() as i64;
                     let v = ((rect.bottom() - p.y) / h).clamp(0.05, 1.0);
                     let pid = self.sel_pat;
                     let mut changed = false;
@@ -2545,6 +2941,9 @@ impl StudioApp {
         if !self.plat.mobile && self.ver_vista && actual == v {
             self.ver_vista = false;
         } else {
+            if v == View::Roll && self.view != View::Roll {
+                self.vista_antes_roll = self.view;
+            }
             self.view = v;
             self.ver_vista = true;
             if v == View::Roll {
@@ -2751,9 +3150,17 @@ impl eframe::App for StudioApp {
         }
         let compact = self.plat.mobile || ui.available_width() < 900.0;
         if self.view != self.vista_prev {
+            if self.view == View::Roll {
+                // para el botón «Volver» del Piano Roll
+                self.vista_antes_roll = self.vista_prev;
+            }
             self.vista_prev = self.view;
             self.ver_vista = true;
         }
+        let roll_full = self.roll_es_completo();
+        if roll_full {
+            egui::CentralPanel::default().frame(Frame::new().fill(PANEL)).show(ui, |ui| self.roll(ui));
+        } else {
 
         egui::Panel::top("top").frame(Frame::new().fill(BG).inner_margin(Margin::symmetric(10, 7))).show(ui, |ui| {
             // barra de arriba en forma de píldora, gris muy oscuro con borde sutil
@@ -2834,9 +3241,12 @@ impl eframe::App for StudioApp {
             egui::CentralPanel::default().frame(Frame::new().fill(PANEL)).show(ui, |ui| self.show_view(ui, v));
         }
 
+        }
         self.plugin_windows(&ctx);
+        self.roll_menu_nota(&ctx);
         self.playlist_menu(&ctx);
         self.barra_clip(&ctx);
+        self.ventana_renombrar(&ctx);
         self.dialogo_guardar(&ctx);
         self.dialogo_rescate(&ctx);
         self.selector_audio(&ctx);

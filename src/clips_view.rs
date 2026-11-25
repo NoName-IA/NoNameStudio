@@ -9,6 +9,10 @@ pub(super) enum ClipCopia {
     Pat(u32),
     Audio(AudioClip),
     Auto(AutoClip),
+    /// una pista entera
+    Pista(Box<super::pistas::PistaCopia>),
+    /// varios clips a la vez
+    Varios(Box<super::seleccion::VariosCopia>),
 }
 
 /// Un toque en curso sobre la playlist (teléfono): para distinguir arrastrar la vista, mantener
@@ -52,13 +56,14 @@ impl StudioApp {
     /// Pista, inicio y largo (en pasos) de un clip.
     pub(super) fn lugar_de_clip(&self, kind: Kind, idx: usize) -> Option<(u32, u32, u32)> {
         match kind {
-            Kind::Pat => self.p.playlist.get(idx).map(|c| (c.track, c.bar * STEPS_PER_BAR, self.p.pattern(c.pat).map(|p| p.bars).unwrap_or(1) * STEPS_PER_BAR)),
+            Kind::Pat => self.p.playlist.get(idx).map(|c| (c.track, c.inicio(), self.p.pattern(c.pat).map(|p| p.bars).unwrap_or(1) * STEPS_PER_BAR)),
             Kind::Audio => self.p.audio_clips.get(idx).map(|c| (c.track, c.start, c.len)),
             Kind::Auto => self.p.autos.get(idx).map(|c| (c.track, c.start, c.len)),
         }
     }
 
     pub(super) fn copiar_clip(&mut self, kind: Kind, idx: usize) {
+        self.copia_sistema = false;
         self.pl_copia = match kind {
             Kind::Pat => self.p.playlist.get(idx).map(|c| ClipCopia::Pat(c.pat)),
             Kind::Audio => self.p.audio_clips.get(idx).cloned().map(ClipCopia::Audio),
@@ -96,15 +101,25 @@ impl StudioApp {
     /// Pega lo copiado en esa pista, desde ese paso (los patrones caen al inicio de su compás).
     pub(super) fn pegar_en(&mut self, track: u32, step: u32) {
         let Some(c) = self.pl_copia.clone() else { return };
+        if let ClipCopia::Pista(pc) = c {
+            // una pista copiada se pega como pista nueva debajo
+            self.pegar_pista_bajo(track, *pc);
+            return;
+        }
+        if let ClipCopia::Varios(v) = c {
+            self.pegar_varios(track, step, &v);
+            return;
+        }
         self.snap();
         match c {
+            ClipCopia::Pista(_) | ClipCopia::Varios(_) => {}
             ClipCopia::Pat(pat) => {
                 if self.p.pattern(pat).is_none() {
                     self.msg = "El patrón copiado ya no existe.".into();
                     self.hist.pop();
                     return;
                 }
-                self.p.playlist.push(Clip { track, bar: step / STEPS_PER_BAR, pat });
+                self.p.playlist.push(Clip { track, bar: step / STEPS_PER_BAR, pat, off: step % STEPS_PER_BAR });
             }
             ClipCopia::Audio(a) => {
                 let id = self.p.new_id();
@@ -273,7 +288,7 @@ impl StudioApp {
                                     if boton(ui, &format!("Poner «{}» aquí", self.cur_pat().name)) {
                                         self.snap();
                                         let pat = self.sel_pat;
-                                        self.p.playlist.push(Clip { track, bar: step / STEPS_PER_BAR, pat });
+                                        self.p.playlist.push(Clip { track, bar: step / STEPS_PER_BAR, pat, off: step % STEPS_PER_BAR });
                                         self.cambios = true;
                                         self.send();
                                         cerrar = true;

@@ -93,6 +93,20 @@ impl StudioApp {
         match which {
             "trap" => self.new_from_template(1),
             "neblina" => self.new_from_template(7),
+            "rollteclado" => {
+                self.roll_teclado = true;
+                return;
+            }
+            "rollpanel" => {
+                self.roll_panel = true;
+                return;
+            }
+            "rollcompleto" => {
+                self.view = View::Roll;
+                self.vista_prev = View::Roll;
+                self.roll_completo = true;
+                return;
+            }
             "house" => self.new_from_template(4),
             "browser" => {
                 self.left_tab = 1;
@@ -141,6 +155,76 @@ impl StudioApp {
             }
             "micro" => {
                 self.mic_panel = true;
+                return;
+            }
+            // pruebas de pistas: elegir la 2, elegir un clip, y borrar / duplicar / subir la pista 2
+            "pista_elegida" => {
+                self.elegir_pista(1);
+                return;
+            }
+            "clip_elegido" => {
+                if let Some(i) = self.p.playlist.iter().position(|c| c.track == 1) {
+                    self.elegir_clip(Kind::Pat, i);
+                }
+                return;
+            }
+            "clips_varios" => {
+                // los clips de los compases 5 a 8 de las dos primeras pistas, como con el recuadro
+                let v: Vec<(Kind, usize)> = (0..self.p.playlist.len()).filter(|&i| (4..8).contains(&self.p.playlist[i].bar)).map(|i| (Kind::Pat, i)).collect();
+                self.elegir_clips(&v);
+                return;
+            }
+            "clips_duplicar" => {
+                let v: Vec<(Kind, usize)> = (0..self.p.playlist.len()).filter(|&i| (4..8).contains(&self.p.playlist[i].bar)).map(|i| (Kind::Pat, i)).collect();
+                self.duplicar_clips(&v);
+                return;
+            }
+            "clips_borrar" => {
+                let v: Vec<(Kind, usize)> = (0..self.p.playlist.len()).filter(|&i| (4..8).contains(&self.p.playlist[i].bar)).map(|i| (Kind::Pat, i)).collect();
+                self.borrar_clips(&v);
+                return;
+            }
+            modo @ ("copiar_destino" | "pegar_destino") => {
+                let v: Vec<(Kind, usize)> = (0..self.p.playlist.len()).filter(|&i| (4..6).contains(&self.p.playlist[i].bar)).map(|i| (Kind::Pat, i)).collect();
+                self.copiar_clips(&v);
+                self.pl_destino = Some((2, 2 * STEPS_PER_BAR));
+                if modo == "pegar_destino" {
+                    self.pegar_atajo();
+                    self.pegar_atajo();
+                }
+                return;
+            }
+            "bucle" => {
+                self.p.loop_a = 2;
+                self.p.loop_b = 6;
+                self.p.loop_on = true;
+                return;
+            }
+            "pistas_varias" => {
+                self.elegir_rango(1, 2);
+                return;
+            }
+            "solo_estas" => {
+                self.elegir_rango(1, 2);
+                self.solo_elegidas();
+                return;
+            }
+            "pista_borrar" => {
+                self.borrar_pista(1);
+                return;
+            }
+            "pista_duplicar" => {
+                self.duplicar_pista(1);
+                return;
+            }
+            "pista_subir" => {
+                self.mover_pista(1, -1);
+                return;
+            }
+            "pista_copiar_pegar" => {
+                self.copiar_pista(0);
+                self.elegir_pista(2);
+                self.pegar_en(2, 0);
                 return;
             }
             modo @ ("retune" | "voz") => {
@@ -1060,6 +1144,7 @@ impl StudioApp {
             return;
         }
         self.mic_mon = None;
+        self.ruido_sync();
         match audio::record(self.status.clone(), &self.settings.entrada, true, self.settings.canal_entrada as usize) {
             Ok(r) => {
                 if self.settings.metro_grabar {
@@ -1085,6 +1170,8 @@ impl StudioApp {
         self.escucha_sync();
         let sr = rs.r.sr;
         let mut data = rs.r.buf.lock().map(|b| b.clone()).unwrap_or_default();
+        // el filtro de ruido llega atrasado: se quita ese tramo del principio
+        data.drain(..rs.r.retraso.min(data.len()));
         drop(rs.r);
         data.truncate((rs.max_s * sr as f32) as usize);
         if data.len() < sr as usize / 4 {

@@ -151,6 +151,8 @@ pub struct Recorder {
     _stream: cpal::Stream,
     pub buf: Arc<Mutex<Vec<f32>>>,
     pub sr: u32,
+    /// muestras de retraso al principio de `buf` (el filtro de ruido atrasa ~30 ms): hay que saltarlas
+    pub retraso: usize,
 }
 
 /// `guardar` = false: solo para escucharse (no acumula lo que entra).
@@ -183,20 +185,44 @@ pub fn record(status: Arc<Status>, entrada: &str, guardar: bool, canal: usize) -
             caido.mic_caido.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     };
+    // quitar ruido (solo PC): se decide al abrir el micrófono; la intensidad se puede mover en vivo
+    #[cfg(not(target_os = "android"))]
+    let mut ruido = status.monitor.ruido_on.load(Ordering::Relaxed).then(|| {
+        crate::ruido::RuidoVivo::new(sr, f32::from_bits(status.monitor.ruido_int.load(Ordering::Relaxed)), status.monitor.ruido_canto.load(Ordering::Relaxed))
+    });
+    #[cfg(not(target_os = "android"))]
+    let retraso = ruido.as_ref().map(|r| r.retraso).unwrap_or(0);
+    #[cfg(target_os = "android")]
+    let retraso = 0usize;
     let push = {
         let buf = buf.clone();
+        let mut crudo: Vec<f32> = Vec::with_capacity(16_384);
+        #[cfg(not(target_os = "android"))]
+        let mut limpio: Vec<f32> = Vec::with_capacity(16_384);
         move |frames: &mut dyn Iterator<Item = f32>| {
             let mut pk = 0f32;
+            crudo.clear();
+            for v in frames {
+                pk = pk.max(v.abs());
+                crudo.push(v);
+            }
+            // el filtro corre fuera de los candados (así la escucha nunca espera por él)
+            #[allow(unused_mut)]
+            let mut nuevo: &[f32] = &crudo;
+            #[cfg(not(target_os = "android"))]
+            if let Some(r) = ruido.as_mut() {
+                r.intensidad(f32::from_bits(status.monitor.ruido_int.load(Ordering::Relaxed)));
+                limpio.clear();
+                r.procesar(&crudo, &mut limpio);
+                nuevo = &limpio;
+            }
             let mut nuevos = 0usize;
             if let Ok(mut b) = buf.lock() {
                 if !guardar {
                     b.clear();
                 }
-                for v in frames {
-                    pk = pk.max(v.abs());
-                    b.push(v);
-                    nuevos += 1;
-                }
+                b.extend_from_slice(nuevo);
+                nuevos = nuevo.len();
             }
             let prev = f32::from_bits(status.input.load(Ordering::Relaxed));
             status.input.store(prev.max(pk).to_bits(), Ordering::Relaxed);
@@ -225,7 +251,7 @@ pub fn record(status: Arc<Status>, entrada: &str, guardar: bool, canal: usize) -
     }
     .map_err(|e| e.to_string())?;
     stream.play().map_err(|e| e.to_string())?;
-    Ok(Recorder { _stream: stream, buf, sr })
+    Ok(Recorder { _stream: stream, buf, sr, retraso })
 }
 
 /// Pide el permiso RECORD_AUDIO en tiempo de ejecución. Devuelve true si ya está concedido.

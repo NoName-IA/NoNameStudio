@@ -54,6 +54,11 @@ impl Atajo {
             Key::Enter => "Enter".to_string(),
             Key::Home => "Inicio".to_string(),
             Key::Backspace => "Retroceso".to_string(),
+            Key::Delete => "Supr".to_string(),
+            Key::ArrowUp => "Flecha arriba".to_string(),
+            Key::ArrowDown => "Flecha abajo".to_string(),
+            Key::ArrowLeft => "Flecha izquierda".to_string(),
+            Key::ArrowRight => "Flecha derecha".to_string(),
             k => k.symbol_or_name().to_string(),
         };
         let mut t = String::new();
@@ -75,7 +80,18 @@ impl Atajo {
 
     /// Se apretó en este cuadro (sin contar la repetición automática del teclado).
     pub fn apretado(&self, i: &egui::InputState) -> bool {
-        self.mods_iguales(i) && i.events.iter().any(|e| matches!(e, egui::Event::Key { key, pressed: true, repeat: false, .. } if *key == self.key))
+        if self.mods_iguales(i) && i.events.iter().any(|e| matches!(e, egui::Event::Key { key, pressed: true, repeat: false, .. } if *key == self.key)) {
+            return true;
+        }
+        // egui no manda Ctrl+C, Ctrl+X ni Ctrl+V como teclas sino como «copiar», «cortar» y «pegar»
+        if self.ctrl && !self.shift && !self.alt {
+            return i.events.iter().any(|e| match (self.key, e) {
+                (Key::C, egui::Event::Copy) | (Key::X, egui::Event::Cut) => true,
+                (Key::V, egui::Event::Paste(_)) | (Key::V, egui::Event::PasteImage(_)) => true,
+                _ => false,
+            });
+        }
+        false
     }
 
     /// Está apretada ahora (para mantener).
@@ -118,6 +134,18 @@ pub(super) const ACCIONES: &[(&str, &str, &str, usize)] = &[
     ("mano", "Mover la vista (mantener y arrastrar)", "Space", 3),
     ("acercar", "Acercar", "Plus", 3),
     ("alejar", "Alejar", "Minus", 3),
+    ("borrar", "Borrar la pista o el clip elegido", "Delete", 3),
+    ("copiar", "Copiar la pista o el clip elegido", "Ctrl+C", 3),
+    ("cortar", "Cortar la pista o el clip elegido", "Ctrl+X", 3),
+    ("pegar", "Pegar", "Ctrl+V", 3),
+    ("duplicar", "Duplicar la pista o el clip elegido", "Ctrl+D", 3),
+    ("renombrar", "Renombrar la pista elegida", "F2", 3),
+    ("elegir_arriba", "Elegir la pista de arriba", "Up", 3),
+    ("elegir_abajo", "Elegir la pista de abajo", "Down", 3),
+    ("pista_subir", "Subir la pista elegida", "Alt+Up", 3),
+    ("pista_bajar", "Bajar la pista elegida", "Alt+Down", 3),
+    ("silenciar_pista", "Silenciar las pistas elegidas", "Shift+M", 3),
+    ("solo_pista", "Que suenen solo las pistas elegidas", "Shift+S", 3),
     ("pad1", "Pad 1", "1", 4),
     ("pad2", "Pad 2", "2", 4),
     ("pad3", "Pad 3", "3", 4),

@@ -88,9 +88,9 @@ fn trap() -> Project {
     let (di, mi) = (d.id, m.id);
     p.patterns = vec![d, m];
     for bar in (0..16).step_by(2) {
-        p.playlist.push(Clip { track: 0, bar, pat: di });
+        p.playlist.push(Clip { track: 0, bar, pat: di, off: 0 });
         if bar >= 4 {
-            p.playlist.push(Clip { track: 1, bar, pat: mi });
+            p.playlist.push(Clip { track: 1, bar, pat: mi, off: 0 });
         }
     }
     p.tracks[0] = "Batería".into();
@@ -264,7 +264,7 @@ fn neblina() -> Project {
 
     let (dci, dvi, m8i, pdi, gbi, gli) = (dc.id, dv.id, m8.id, pd.id, gb.id, gl.id);
     p.patterns = vec![dc, dv, m8, pd, gb, gl];
-    let clip = |p: &mut Project, track: u32, bar: u32, pat: u32| p.playlist.push(Clip { track, bar, pat });
+    let clip = |p: &mut Project, track: u32, bar: u32, pat: u32| p.playlist.push(Clip { track, bar, pat, off: 0 });
     // intro 0-3: pad + campana
     clip(&mut p, 2, 0, pdi);
     clip(&mut p, 3, 0, gbi);
@@ -344,10 +344,10 @@ fn reggaeton() -> Project {
     let (di, mi) = (d.id, m.id);
     p.patterns = vec![d, m];
     for bar in 0..16 {
-        p.playlist.push(Clip { track: 0, bar, pat: di });
+        p.playlist.push(Clip { track: 0, bar, pat: di, off: 0 });
     }
     for bar in (0..16).step_by(4) {
-        p.playlist.push(Clip { track: 1, bar, pat: mi });
+        p.playlist.push(Clip { track: 1, bar, pat: mi, off: 0 });
     }
     p.tracks[0] = "Dembow".into();
     p.tracks[1] = "Armonía".into();
@@ -389,10 +389,10 @@ fn house() -> Project {
     let (di, mi) = (d.id, m.id);
     p.patterns = vec![d, m];
     for bar in 0..16 {
-        p.playlist.push(Clip { track: 0, bar, pat: di });
+        p.playlist.push(Clip { track: 0, bar, pat: di, off: 0 });
     }
     for bar in (4..16).step_by(2) {
-        p.playlist.push(Clip { track: 1, bar, pat: mi });
+        p.playlist.push(Clip { track: 1, bar, pat: mi, off: 0 });
     }
     // automatización de ejemplo: el filtro de los acordes se abre
     let aid = p.new_id();
@@ -432,8 +432,8 @@ fn lofi() -> Project {
     let (di, mi) = (d.id, m.id);
     p.patterns = vec![d, m];
     for bar in (0..16).step_by(2) {
-        p.playlist.push(Clip { track: 0, bar, pat: di });
-        p.playlist.push(Clip { track: 1, bar, pat: mi });
+        p.playlist.push(Clip { track: 0, bar, pat: di, off: 0 });
+        p.playlist.push(Clip { track: 1, bar, pat: mi, off: 0 });
     }
     p.tracks[0] = "Batería".into();
     p.tracks[1] = "Rhodes".into();
@@ -467,8 +467,8 @@ fn drill() -> Project {
     let (di, mi) = (d.id, m.id);
     p.patterns = vec![d, m];
     for bar in (0..16).step_by(2) {
-        p.playlist.push(Clip { track: 0, bar, pat: di });
-        p.playlist.push(Clip { track: 1, bar, pat: mi });
+        p.playlist.push(Clip { track: 0, bar, pat: di, off: 0 });
+        p.playlist.push(Clip { track: 1, bar, pat: mi, off: 0 });
     }
     p.tracks[0] = "Batería".into();
     p.tracks[1] = "808 / cuerdas".into();

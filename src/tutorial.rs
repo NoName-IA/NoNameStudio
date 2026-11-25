@@ -80,10 +80,10 @@ const PASOS: [Paso; 12] = [
     Paso {
         zona: "roll",
         titulo: "Escribe notas",
-        texto: "Haz clic en la cuadrícula para poner notas (al menos 3). Arrastra una nota para moverla o desde su borde derecho para alargarla. Clic derecho la borra.",
+        texto: "Haz clic en la cuadrícula para poner notas (al menos 3). Arrastra una nota para moverla o desde su borde derecho para alargarla. Clic derecho la borra y doble clic abre su menú.",
         accion: Accion::Notas,
         bien: "¡Ya tienes melodía! Arriba puedes elegir la escala, poner acordes listos o usar el arpegiador.",
-        texto_cel: "Toca la cuadrícula para poner notas (al menos 3). Arrastra una nota para moverla o desde su borde derecho para alargarla. Mantenerla apretada la borra. Arrastrar en el vacío desliza la vista.",
+        texto_cel: "Toca la cuadrícula para poner notas (al menos 3). Arrastra una nota para moverla o desde su borde derecho para alargarla. Mantenerla apretada abre su menú (fuerza, largo, borrar…). Arrastrar en el vacío desliza la vista.",
         bien_cel: "",
     },
     Paso {

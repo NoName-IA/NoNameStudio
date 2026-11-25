@@ -1,0 +1,39 @@
+(los archivos que estan aca afuera de este readme esos no los toques, son instrucciones agenticas)
+
+1. Cierra NoName Studio
+
+Cierra todas las ventanas de NoName Studio, tanto la de desarrollo como la del escritorio.
+Si alguna queda abierta, el script no puede reemplazar el .exe y se detiene con error.
+
+2. Abre PowerShell en la carpeta del proyecto
+
+1. Aprieta Windows + R, escribe powershell y dale Enter.
+2. Pega esto y dale Enter:
+cd C:\Users\PC\Pictures\VSCODEX\noname_studio
+
+3. Arma el .exe y el .apk
+
+Pega esto y dale Enter:
+powershell -ExecutionPolicy Bypass -File tools\armar.ps1
+- Tarda varios minutos: el .exe se arma con todas las optimizaciones y después se arma el .apk.
+  Déjalo hasta que termine.
+- No le agregues 2>&1 al final. En tu versión de PowerShell eso hace que el script se corte.
+- Al terminar ves una tablita con los archivos y sus tamaños.
+
+Quedan en dos lugares:
+- C:\Users\PC\Pictures\VSCODEX\noname_studio\dist\ → NoNameStudio.exe y NoNameStudio.apk
+- La carpeta NoName Studio de tu escritorio, con una copia de los dos.
+
+4. Instala el .apk en el teléfono
+
+1. Conecta el Redmi por USB, con la depuración USB activada.
+2. En la misma ventana de PowerShell pega esto y dale Enter:
+& "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" install -r dist\NoNameStudio.apk
+3. Si en el teléfono aparece un aviso de MIUI preguntando si permites instalar por USB, acéptalo.
+4. Cuando termine, PowerShell dice Success.
+
+Si algo falla
+
+- Si en el paso 3 sale un error en rojo y el script se detiene, cópiame el mensaje.
+- Si en el paso 4 dice no devices, revisa el cable, que la depuración USB esté activa y que hayas 
+ aceptado en el teléfono el aviso de "permitir depuración".

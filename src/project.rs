@@ -247,6 +247,21 @@ pub struct Clip {
     pub track: u32,
     pub bar: u32,
     pub pat: u32,
+    /// pasos después del inicio del compás (0..15): el clip puede empezar en cualquier tiempo
+    #[serde(default)]
+    pub off: u32,
+}
+
+impl Clip {
+    /// Paso donde empieza el clip.
+    pub fn inicio(&self) -> u32 {
+        self.bar * STEPS_PER_BAR + self.off
+    }
+    /// Lo pone en ese paso (compás y desfase).
+    pub fn poner_inicio(&mut self, paso: u32) {
+        self.bar = paso / STEPS_PER_BAR;
+        self.off = paso % STEPS_PER_BAR;
+    }
 }
 
 /// Ajustes de una pista de la playlist.
@@ -583,7 +598,7 @@ impl Project {
         self.channels.iter_mut().find(|c| c.id == id)
     }
     pub fn song_bars(&self) -> u32 {
-        let pats = self.playlist.iter().filter_map(|c| self.pattern(c.pat).map(|p| c.bar + p.bars)).max().unwrap_or(0);
+        let pats = self.playlist.iter().filter_map(|c| self.pattern(c.pat).map(|p| (c.inicio() + p.bars * STEPS_PER_BAR).div_ceil(STEPS_PER_BAR))).max().unwrap_or(0);
         let auds = self.audio_clips.iter().map(|c| (c.start + c.len).div_ceil(STEPS_PER_BAR)).max().unwrap_or(0);
         let auts = self.autos.iter().map(|c| (c.start + c.len).div_ceil(STEPS_PER_BAR)).max().unwrap_or(0);
         pats.max(auds).max(auts)
@@ -613,7 +628,7 @@ impl Project {
             None => {
                 for cl in &self.playlist {
                     if let Some(pt) = self.pattern(cl.pat) {
-                        let s0 = cl.bar as u64 * STEPS_PER_BAR as u64;
+                        let s0 = cl.inicio() as u64;
                         if paso >= s0 && paso < s0 + pt.len_steps() as u64 {
                             sumar(pt, (paso - s0) as u32);
                         }
@@ -801,13 +816,13 @@ impl Project {
         mel.notes.insert(e, [(0u32, 74u8), (3, 77), (6, 74), (10, 72), (14, 70)].iter().map(|&(s, m)| Note { s, l: 4, m, v: 0.75, o: 0.0 }).collect());
         p.patterns = vec![drums, chords, mel];
         for bar in (0..20).step_by(4) {
-            p.playlist.push(Clip { track: 0, bar, pat: cid });
+            p.playlist.push(Clip { track: 0, bar, pat: cid, off: 0 });
         }
         for bar in (2..18).step_by(2) {
-            p.playlist.push(Clip { track: 1, bar, pat: pid });
+            p.playlist.push(Clip { track: 1, bar, pat: pid, off: 0 });
         }
         for bar in (10..18).step_by(2) {
-            p.playlist.push(Clip { track: 2, bar, pat: mid });
+            p.playlist.push(Clip { track: 2, bar, pat: mid, off: 0 });
         }
         p
     }

@@ -28,6 +28,9 @@ image = { version = "0.25", default-features = false, features = ["png", "ico"] 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 rfd = "0.18"
 midir = "0.11"
+# quitar ruido del micrófono (DeepFilterNet 3), solo en PC
+dfn3_rs = "0.1.2"
+realfft = "3.4"
 
 [target.'cfg(windows)'.dependencies]
 clap-sys = "0.5"

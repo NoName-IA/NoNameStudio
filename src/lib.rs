@@ -14,6 +14,8 @@ pub mod midi;
 #[cfg(windows)]
 pub mod plugin_host;
 pub mod templates;
+#[cfg(not(target_os = "android"))]
+pub mod ruido;
 pub mod project;
 
 pub use app::{AutoTest, Platform, StudioApp};

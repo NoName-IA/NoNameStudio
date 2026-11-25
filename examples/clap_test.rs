@@ -67,7 +67,7 @@ fn main() {
     let mut pat = Pattern { id: pid, name: "p".into(), bars: 1, color: PALETTE[0], steps: Default::default(), notes: Default::default(), audio: Default::default() };
     pat.notes.insert(id, vec![Note { s: 0, l: 8, m: 69, v: 1.0, o: 0.0 }]);
     pr.patterns.push(pat);
-    pr.playlist.push(Clip { track: 0, bar: 0, pat: pid });
+    pr.playlist.push(Clip { track: 0, bar: 0, pat: pid, off: 0 });
     let slots: Vec<(u32, PluginSlot)> = pr.channels.iter().flat_map(|c| c.inserts.iter().chain(c.instrument.iter()).map(move |s| (c.id, s.clone()))).collect();
     let (a, b) = (AtomicU32::new(0), AtomicBool::new(false));
     let audio = render_song_with(&pr, &Bank::default(), 44100.0, &a, &b, &mut |e| {

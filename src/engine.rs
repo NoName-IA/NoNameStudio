@@ -44,6 +44,11 @@ pub struct Monitor {
     /// nota cantada (f32 en bits; 0 = nada) y nota corregida (+1; 0 = ninguna)
     pub cantada: AtomicU32,
     pub objetivo: AtomicU32,
+    /// quitar ruido del micrófono (solo PC; prendido y tipo se fijan al abrir el micrófono),
+    /// motor para cantar (si no, el de hablar) e intensidad 0..1 (f32 en bits)
+    pub ruido_on: AtomicBool,
+    pub ruido_canto: AtomicBool,
+    pub ruido_int: AtomicU32,
 }
 
 /// Estado compartido con la interfaz (solo atómicos, sin bloqueos).
@@ -122,6 +127,9 @@ impl Status {
                 acorde: AtomicU32::new(0),
                 cantada: AtomicU32::new(0),
                 objetivo: AtomicU32::new(0),
+                ruido_on: AtomicBool::new(false),
+                ruido_canto: AtomicBool::new(true),
+                ruido_int: AtomicU32::new(0.7f32.to_bits()),
             },
         }
     }
@@ -640,7 +648,7 @@ impl Engine {
             Mode::Song => {
                 for cl in &self.proj.playlist {
                     if let Some(pi) = self.proj.patterns.iter().position(|p| p.id == cl.pat) {
-                        let s0 = cl.bar as u64 * STEPS_PER_BAR as u64;
+                        let s0 = cl.inicio() as u64;
                         let len = self.proj.patterns[pi].len_steps() as u64;
                         if s >= s0 && s < s0 + len && ne < events.len() {
                             if let Some((g, pn)) = self.proj.pista_suena(cl.track as usize) {
@@ -1039,8 +1047,8 @@ impl Engine {
             // limitador limpio: baja el volumen al instante en vez de deformar la onda
             let (l, r) = (v * pl + rl, v * pr + rr);
             let pico = l.abs().max(r.abs()) * self.mon_lim;
-            if pico > 0.85 {
-                self.mon_lim *= 0.85 / pico;
+            if pico > 0.95 {
+                self.mon_lim *= 0.95 / pico;
             } else {
                 self.mon_lim += (1.0 - self.mon_lim) * rel_lim;
             }

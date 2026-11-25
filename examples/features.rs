@@ -79,7 +79,7 @@ fn main() {
     pat.notes.insert(id, vec![Note { s: 0, l: 4, m: 81, v: 1.0, o: 0.0 }]);
     pat.steps.insert(id, { let mut v = vec![0.0; 16]; v[8] = 1.0; v });
     p.patterns.push(pat);
-    p.playlist.push(Clip { track: 0, bar: 0, pat: pid });
+    p.playlist.push(Clip { track: 0, bar: 0, pat: pid, off: 0 });
     let mut bank = Bank::default();
     media::ensure(&p, &dir, &mut bank.files);
     let a = render(&p, &bank);
@@ -150,7 +150,7 @@ fn main() {
     pat.steps.insert(k, (0..32).map(|i| if i % 4 == 0 { 1.0 } else { 0.0 }).collect());
     pat.notes.insert(pd, vec![Note { s: 0, l: 32, m: 60, v: 1.0, o: 0.0 }]);
     p.patterns.push(pat);
-    p.playlist.push(Clip { track: 0, bar: 0, pat: pid });
+    p.playlist.push(Clip { track: 0, bar: 0, pat: pid, off: 0 });
     // solo el pad (el kick sigue disparando el sidechain aunque esté silenciado en la mezcla: se usa su volumen)
     p.channel_mut(k).unwrap().vol = 0.0001;
     let with = render(&p, &Bank::default());
@@ -201,7 +201,7 @@ fn main() {
     let mut pat = Pattern { id: pid, name: "a".into(), bars: 1, color: PALETTE[0], steps: Default::default(), notes: Default::default(), audio: Default::default() };
     pat.notes.insert(s, vec![Note { s: 0, l: 16, m: 60, v: 1.0, o: 0.0 }, Note { s: 0, l: 16, m: 64, v: 1.0, o: 0.0 }, Note { s: 0, l: 16, m: 67, v: 1.0, o: 0.0 }]);
     p.patterns.push(pat);
-    p.playlist.push(Clip { track: 0, bar: 0, pat: pid });
+    p.playlist.push(Clip { track: 0, bar: 0, pat: pid, off: 0 });
     let a = render(&p, &Bank::default());
     let step = p.step_secs() as f32;
     let fs: Vec<f32> = (0..4).map(|i| freq(seg(&a, i as f32 * step + 0.01, i as f32 * step + 0.11))).collect();
@@ -598,7 +598,7 @@ fn main() {
         let mut pat = Pattern { id: pid, name: "a".into(), bars: 1, color: PALETTE[0], steps: Default::default(), notes: Default::default(), audio: Default::default() };
         pat.notes.insert(s, vec![Note { s: 0, l: 2, m: 72, v: 1.0, o: 0.0 }]);
         p.patterns.push(pat);
-        p.playlist.push(Clip { track: 0, bar: 0, pat: pid });
+        p.playlist.push(Clip { track: 0, bar: 0, pat: pid, off: 0 });
         let a = render(&p, &Bank::default());
         let mut q = p.clone();
         q.channels[0].efectos.clear();
@@ -622,7 +622,7 @@ fn main() {
         let mut pat = Pattern { id: pid, name: "a".into(), bars: 1, color: PALETTE[0], steps: Default::default(), notes: Default::default(), audio: Default::default() };
         pat.notes.insert(s, vec![Note { s: 0, l: 8, m: 57, v: 1.0, o: 0.0 }]);
         p.patterns.push(pat);
-        p.playlist.push(Clip { track: 0, bar: 0, pat: pid });
+        p.playlist.push(Clip { track: 0, bar: 0, pat: pid, off: 0 });
         let a = render(&p, &Bank::default());
         let (f0, f1) = (freq(seg(&a, 0.005, 0.05)), freq(seg(&a, 0.25, 0.5)));
         all &= ok(f0 > f1 * 1.3, "Glide (Tom 808 cae de tono)", format!("{f0:.0} Hz al inicio → {f1:.0} Hz"));
@@ -638,7 +638,7 @@ fn main() {
         let mut pat = Pattern { id: pid, name: "p".into(), bars: 1, color: PALETTE[0], steps: Default::default(), notes: Default::default(), audio: Default::default() };
         pat.steps.insert(k, (0..16).map(|i| if i == 0 { 1.0 } else { 0.0 }).collect());
         p.patterns.push(pat);
-        p.playlist.push(Clip { track: 0, bar: 0, pat: pid });
+        p.playlist.push(Clip { track: 0, bar: 0, pat: pid, off: 0 });
         let st = Arc::new(Status::new());
         st.metro_vol.store(0f32.to_bits(), std::sync::atomic::Ordering::Relaxed);
         let mut e = Engine::new(SR, p.clone(), st);

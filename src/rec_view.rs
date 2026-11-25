@@ -25,11 +25,20 @@ impl StudioApp {
 
     /// Deja la escucha del micrófono como dicen los ajustes: abre o cierra la entrada y pasa
     /// volumen y autotune al motor. Se llama al cambiar algo y al empezar o terminar de grabar.
+    /// Pasa al motor si hay que quitar el ruido del micrófono y con cuánta fuerza (solo PC).
+    pub(super) fn ruido_sync(&self) {
+        let m = &self.status.monitor;
+        m.ruido_on.store(cfg!(not(target_os = "android")) && self.settings.quitar_ruido, Ordering::Relaxed);
+        m.ruido_canto.store(self.settings.ruido_canto, Ordering::Relaxed);
+        m.ruido_int.store(self.settings.ruido_intensidad.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
     pub(super) fn escucha_sync(&mut self) {
+        self.ruido_sync();
         let grabando = self.rec.is_some() || self.rec_track.is_some();
         let tp = self.tune_params();
         let m = &self.status.monitor;
-        m.gain.store(self.settings.vol_escucha.to_bits(), Ordering::Relaxed);
+        m.gain.store((self.settings.vol_escucha * VOLUMEN_EXTRA).to_bits(), Ordering::Relaxed);
         m.pan.store(self.settings.pan_escucha.to_bits(), Ordering::Relaxed);
         m.reverb.store(self.settings.reverb_escucha.to_bits(), Ordering::Relaxed);
         m.tune_key.store(tp.key as u32, Ordering::Relaxed);
@@ -206,11 +215,11 @@ impl StudioApp {
                 if !franja {
                     ui.add_space(6.0);
                 }
-                let mut niv = self.settings.nivelar_grabacion;
-                if ui.checkbox(&mut niv, if franja { "Grabar nivelado" } else { "Grabar con el volumen nivelado" }).on_hover_text("La toma queda tan fuerte y pareja como te escuchas (si lo apagas, se graba tal cual llega del micrófono)").changed() {
-                    self.settings.nivelar_grabacion = niv;
-                    self.save_settings();
-                }
+                #[cfg(not(target_os = "android"))]
+                self.ruido_ui(ui, franja);
+                #[cfg(not(target_os = "android"))]
+                ui.add_space(if franja { 0.0 } else { 4.0 });
+                self.nivelado_ui(ui, franja);
                 // efectos de voz del canal elegido (se oyen en la canción y al exportar)
                 if let Some(c) = self.p.channel(self.sel_ch).filter(|c| matches!(c.inst, Inst::Audio | Inst::Vocal)).cloned() {
                     if !franja {
@@ -509,7 +518,7 @@ impl StudioApp {
                     }
                 }
                 if resp.double_clicked() {
-                    self.settings.vol_escucha = 0.5;
+                    self.settings.vol_escucha = 1.0;
                 }
                 let p = ui.painter();
                 let cx = r.center().x;
@@ -522,7 +531,7 @@ impl StudioApp {
                 let yv = y1 - (self.settings.vol_escucha / maxv) * (y1 - y0);
                 p.line_segment([Pos2::new(cx, yv), Pos2::new(cx, y1)], Stroke::new(2.5, ACCENT));
                 p.circle_filled(Pos2::new(cx, yv), 7.0, Color32::WHITE);
-                resp.on_hover_text(format!("Volumen de tu voz: {:.0} % · doble clic: 50 %", self.settings.vol_escucha * 100.0));
+                resp.on_hover_text(format!("Volumen de tu voz: {:.0} % · doble clic: 100 %", self.settings.vol_escucha * 100.0));
                 ui.vertical_centered(|ui| {
                     ui.label(RichText::new("Volumen").size(13.0).strong().color(Color32::WHITE));
                 });
@@ -715,6 +724,137 @@ impl StudioApp {
             x += 1.0;
         }
     }
+
+    /// «Quitar ruido» del micrófono (DeepFilterNet, como el filtro de ruido de Discord). Solo en PC.
+    /// Un clic lo prende o lo apaga; doble clic lo deja en «Solo mi voz» (se quita todo lo de alrededor).
+    #[cfg(not(target_os = "android"))]
+    fn ruido_ui(&mut self, ui: &mut Ui, franja: bool) {
+        let grabando = self.rec.is_some() || self.rec_track.is_some();
+        let on = self.settings.quitar_ruido;
+        let f = self.settings.ruido_intensidad;
+        let tipo = if self.settings.ruido_canto { "Cantar" } else { "Hablar" };
+        let estado = if !on {
+            "Doble clic: solo tu voz".to_string()
+        } else if f >= 0.99 {
+            format!("{tipo} · Solo tu voz")
+        } else {
+            format!("{tipo} · {}", modo_ruido(f).map(|k| MODOS_RUIDO[k].0.to_string()).unwrap_or_else(|| format!("{:.0} %", f * 100.0)))
+        };
+        let ancho = if franja { 240.0 } else { 230.0 };
+        let resp = tarjeta(ui, ancho, on, !grabando, &icono_ruido, "Quitar ruido", &estado);
+        let resp = if grabando {
+            resp.on_hover_text("Se puede cambiar cuando termines de grabar")
+        } else {
+            resp.on_hover_text("Quita el ruido de fondo. Lo que te escuchas y lo que se graba salen limpios.\n\nCantar: quita el ventilador, el aire y el zumbido sin tocar las notas.\nHablar: inteligencia artificial (DeepFilterNet), quita también teclado y gente, pero deforma el canto.\n\nClic: prender o apagar.\nDoble clic: «Solo mi voz», quita todo el sonido a tu alrededor.")
+        };
+        if !grabando {
+            if resp.double_clicked() {
+                self.poner_ruido(true, 1.0);
+                self.msg = "Solo tu voz: se quita todo el sonido a tu alrededor".into();
+            } else if resp.clicked() {
+                self.poner_ruido(!on, f);
+                self.msg = if !on { "Quitar ruido: encendido".into() } else { "Quitar ruido: apagado".into() };
+            }
+        }
+        if !self.settings.quitar_ruido {
+            return;
+        }
+        // para qué: cantar o hablar (cambia el motor; se elige al abrir el micrófono)
+        ui.add_space(4.0);
+        let (fila, _) = ui.allocate_exact_size(Vec2::new(ancho, 26.0), Sense::hover());
+        ui.painter().rect_filled(fila, 13, Color32::from_gray(20));
+        let w = fila.width() / 2.0;
+        let tipos = [
+            ("Cantar", true, "Para cantar y rapear: quita el ruido de fondo constante (ventilador, aire, zumbido) sin deformar las notas"),
+            ("Hablar", false, "Para hablar o narrar: inteligencia artificial que quita también ruidos que cambian (teclado, gente), pero deforma las notas al cantar"),
+        ];
+        for (k, (nombre, canto, ayuda)) in tipos.iter().enumerate() {
+            let r = Rect::from_min_size(Pos2::new(fila.left() + w * k as f32, fila.top()), Vec2::new(w, fila.height())).shrink(2.0);
+            let sense = if grabando { Sense::hover() } else { Sense::click() };
+            let resp = ui.interact(r, ui.id().with(("tipo_ruido", k)), sense).on_hover_text(if grabando { "Se puede cambiar cuando termines de grabar" } else { *ayuda });
+            let sel = self.settings.ruido_canto == *canto;
+            let p = ui.painter();
+            if sel {
+                p.rect_filled(r, 11, Color32::from_gray(70));
+            } else if resp.hovered() && !grabando {
+                p.rect_filled(r, 11, Color32::from_gray(40));
+            }
+            p.text(r.center(), Align2::CENTER_CENTER, *nombre, FontId::proportional(12.0), if sel { Color32::WHITE } else { Color32::from_gray(170) });
+            if resp.clicked() && !sel {
+                self.settings.ruido_canto = *canto;
+                self.save_settings();
+                // otro motor: se vuelve a abrir el micrófono si te estás escuchando
+                self.mic_mon = None;
+                self.escucha_sync();
+                self.msg = if *canto { "Quitar ruido para cantar".into() } else { "Quitar ruido para hablar".into() };
+            }
+        }
+        // modos rápidos
+        ui.add_space(4.0);
+        let actual = modo_ruido(self.settings.ruido_intensidad);
+        let (fila, _) = ui.allocate_exact_size(Vec2::new(ancho, 26.0), Sense::hover());
+        ui.painter().rect_filled(fila, 13, Color32::from_gray(20));
+        let w = fila.width() / MODOS_RUIDO.len() as f32;
+        for (k, (nombre, valor, ayuda)) in MODOS_RUIDO.iter().enumerate() {
+            let r = Rect::from_min_size(Pos2::new(fila.left() + w * k as f32, fila.top()), Vec2::new(w, fila.height())).shrink(2.0);
+            let resp = ui.interact(r, ui.id().with(("modo_ruido", k)), Sense::click()).on_hover_text(*ayuda);
+            let sel = actual == Some(k);
+            let p = ui.painter();
+            if sel {
+                p.rect_filled(r, 11, Color32::WHITE);
+            } else if resp.hovered() {
+                p.rect_filled(r, 11, Color32::from_gray(40));
+            }
+            p.text(r.center(), Align2::CENTER_CENTER, *nombre, FontId::proportional(12.0), if sel { Color32::from_gray(17) } else { Color32::from_gray(200) });
+            if resp.clicked() {
+                self.poner_ruido(true, *valor);
+            }
+        }
+        // ajuste fino
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().slider_width = ancho - 70.0;
+            let r = ui.add(egui::Slider::new(&mut self.settings.ruido_intensidad, 0.0..=1.0).show_value(false));
+            ui.label(RichText::new(if self.settings.ruido_intensidad >= 0.99 { "Máx.".to_string() } else { format!("{:.0} %", self.settings.ruido_intensidad * 100.0) }).small().color(DIM));
+            let r = r.on_hover_text("Cuánto ruido se quita");
+            if r.changed() {
+                self.ruido_sync();
+            }
+            if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                self.save_settings();
+            }
+        });
+    }
+
+    /// Prende o apaga el filtro y fija su intensidad (si se prende o se apaga, se vuelve a abrir el micrófono).
+    #[cfg(not(target_os = "android"))]
+    fn poner_ruido(&mut self, on: bool, intensidad: f32) {
+        let cambia = on != self.settings.quitar_ruido;
+        self.settings.quitar_ruido = on;
+        self.settings.ruido_intensidad = intensidad.clamp(0.0, 1.0);
+        self.save_settings();
+        if cambia {
+            // el filtro se elige al abrir el micrófono: si te estás escuchando, se vuelve a abrir
+            self.mic_mon = None;
+            self.escucha_sync();
+        } else {
+            self.ruido_sync();
+        }
+    }
+
+    /// «Volumen parejo»: la toma pasa por el mismo nivelador que cuando te escuchas.
+    fn nivelado_ui(&mut self, ui: &mut Ui, franja: bool) {
+        let on = self.settings.nivelar_grabacion;
+        let ancho = if franja { 240.0 } else { 230.0 };
+        let estado = if on { "Como te escuchas" } else { "Se graba tal cual" };
+        let resp = tarjeta(ui, ancho, on, true, &icono_nivelado, "Volumen parejo", estado)
+            .on_hover_text("Sube las partes bajitas y baja las fuertes, sin subir el ruido cuando no cantas. Si lo apagas, se graba tal cual llega del micrófono.");
+        if resp.clicked() {
+            self.settings.nivelar_grabacion = !on;
+            self.save_settings();
+            self.msg = if !on { "Volumen parejo: encendido".into() } else { "Volumen parejo: apagado (se graba tal cual)".into() };
+        }
+    }
 }
 
 /// Íconos de los estilos de NN Tune.
@@ -797,3 +937,85 @@ fn nombre_acorde(m: u16) -> String {
     }
     (0..12).filter(|i| (m >> i) & 1 == 1).map(|i| KEY_NAMES[i]).collect::<Vec<_>>().join(" · ")
 }
+
+/// Modos rápidos de «Quitar ruido»: nombre, intensidad y ayuda.
+#[cfg(not(target_os = "android"))]
+const MODOS_RUIDO: [(&str, f32, &str); 3] = [
+    ("Suave", 0.35, "Baja el ruido sin tocar casi nada la voz"),
+    ("Normal", 0.7, "Quita casi todo el ruido de fondo"),
+    ("Solo mi voz", 1.0, "Quita lo más que se puede del sonido a tu alrededor (también con doble clic en la tarjeta)"),
+];
+
+/// Qué modo rápido coincide con la intensidad (si es un valor a mano, ninguno).
+#[cfg(not(target_os = "android"))]
+fn modo_ruido(f: f32) -> Option<usize> {
+    MODOS_RUIDO.iter().position(|m| (m.1 - f).abs() < 0.015 || (m.1 >= 0.99 && f >= 0.99))
+}
+
+fn mezclar(a: Color32, b: Color32, t: f32) -> Color32 {
+    let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgb(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()))
+}
+
+/// Tarjeta con interruptor: ícono en un círculo, título, estado y un interruptor a la derecha.
+fn tarjeta(ui: &mut Ui, ancho: f32, on: bool, activo: bool, icono: &dyn Fn(&egui::Painter, Pos2, Color32), titulo: &str, estado: &str) -> egui::Response {
+    let (r, resp) = ui.allocate_exact_size(Vec2::new(ancho, 50.0), if activo { Sense::click() } else { Sense::hover() });
+    let t = ui.ctx().animate_bool_with_time(resp.id, on, 0.15);
+    let hover = activo && resp.hovered();
+    let p = ui.painter();
+    let fondo = mezclar(PANEL2, Color32::from_gray(38), t);
+    p.rect_filled(r, 12, if hover { mezclar(fondo, Color32::WHITE, 0.06) } else { fondo });
+    p.rect_stroke(r, 12, Stroke::new(1.0, mezclar(LINE, Color32::from_gray(95), t)), StrokeKind::Inside);
+    let c = Pos2::new(r.left() + 25.0, r.center().y);
+    p.circle_filled(c, 15.0, mezclar(Color32::from_gray(50), Color32::WHITE, t));
+    icono(p, c, mezclar(Color32::from_gray(215), Color32::from_gray(17), t));
+    let tinta = if activo { Color32::WHITE } else { DIM };
+    let pt = p.with_clip_rect(Rect::from_min_max(r.min, Pos2::new(r.right() - 48.0, r.bottom())));
+    pt.text(Pos2::new(r.left() + 49.0, r.center().y - 8.0), Align2::LEFT_CENTER, titulo, FontId::proportional(13.5), tinta);
+    pt.text(Pos2::new(r.left() + 49.0, r.center().y + 9.0), Align2::LEFT_CENTER, estado, FontId::proportional(11.0), mezclar(DIM, Color32::from_gray(190), t));
+    // interruptor (igual al de NN Tune)
+    let sw = Rect::from_center_size(Pos2::new(r.right() - 26.0, r.center().y), Vec2::new(34.0, 19.0));
+    p.rect_filled(sw, 9.5, mezclar(Color32::from_gray(64), Color32::WHITE, t));
+    p.circle_filled(Pos2::new(sw.left() + 9.5 + t * 15.0, sw.center().y), 6.5, mezclar(Color32::WHITE, Color32::from_gray(17), t));
+    if !activo {
+        p.rect_filled(r, 12, Color32::from_black_alpha(90));
+    }
+    resp
+}
+
+/// Micrófono con un destello (filtro inteligente).
+#[cfg(not(target_os = "android"))]
+fn icono_ruido(p: &egui::Painter, c: Pos2, col: Color32) {
+    let m = c + Vec2::new(-1.5, -1.5);
+    p.rect_filled(Rect::from_center_size(m, Vec2::new(6.0, 10.0)), 3, col);
+    p.add(egui::Shape::line(
+        (0..=10)
+            .map(|i| {
+                let a = std::f32::consts::PI * (i as f32 / 10.0);
+                m + Vec2::new(a.cos() * 5.5, 1.0 + a.sin() * 5.5)
+            })
+            .collect(),
+        Stroke::new(1.4, col),
+    ));
+    p.line_segment([m + Vec2::new(0.0, 6.5), m + Vec2::new(0.0, 9.0)], Stroke::new(1.4, col));
+    // destello de cuatro puntas
+    let e = c + Vec2::new(7.0, -6.0);
+    let (l, k) = (4.0, 1.1);
+    p.add(egui::Shape::convex_polygon(
+        vec![e + Vec2::new(0.0, -l), e + Vec2::new(k, -k), e + Vec2::new(l, 0.0), e + Vec2::new(k, k), e + Vec2::new(0.0, l), e + Vec2::new(-k, k), e + Vec2::new(-l, 0.0), e + Vec2::new(-k, -k)],
+        col,
+        Stroke::NONE,
+    ));
+}
+
+/// Barras de distinto alto que quedan parejas debajo de una línea.
+fn icono_nivelado(p: &egui::Painter, c: Pos2, col: Color32) {
+    for (k, h) in [5.0f32, 8.0, 8.0, 8.0, 6.0].iter().enumerate() {
+        let x = c.x - 8.0 + k as f32 * 4.0;
+        p.rect_filled(Rect::from_min_max(Pos2::new(x - 1.2, c.y + 6.0 - h), Pos2::new(x + 1.2, c.y + 6.0)), 1, col);
+    }
+    p.line_segment([Pos2::new(c.x - 10.0, c.y - 3.5), Pos2::new(c.x + 10.0, c.y - 3.5)], Stroke::new(1.2, col.gamma_multiply(0.7)));
+}
+
+/// La voz que te escuchas sale más fuerte que la señal del micrófono (100 % = 1,4 veces).
+const VOLUMEN_EXTRA: f32 = 1.4;

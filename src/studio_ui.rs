@@ -53,6 +53,14 @@ pub(super) struct Settings {
     pub canal_entrada: u8,
     /// la voz grabada pasa por el mismo nivelador que cuando te escuchas
     pub nivelar_grabacion: bool,
+    /// quitar el ruido del micrófono con DeepFilterNet (solo PC) e intensidad (0..1)
+    #[serde(default)]
+    pub quitar_ruido: bool,
+    #[serde(default = "intensidad_ruido_def")]
+    pub ruido_intensidad: f32,
+    /// motor para cantar (reducción espectral) o para hablar (DeepFilterNet)
+    #[serde(default = "si")]
+    pub ruido_canto: bool,
     /// metrónomo: volumen, sonido, acento en el primer tiempo y subdivisión
     pub metro_vol: f32,
     pub metro_sonido: u8,
@@ -122,9 +130,12 @@ impl Default for Settings {
             buffer: 0,
             metro_grabar: true,
             escucharme: false,
-            vol_escucha: 0.5,
+            vol_escucha: 1.0,
             canal_entrada: 0,
             nivelar_grabacion: true,
+            quitar_ruido: false,
+            ruido_intensidad: intensidad_ruido_def(),
+            ruido_canto: true,
             metro_vol: 0.8,
             metro_sonido: 0,
             metro_acento: true,
@@ -181,6 +192,12 @@ pub(super) enum PlDrag {
     Right { kind: Kind, id: u32 },
     Left { id: u32, start: u32, len: u32, off: f32 },
     Loop { a: u32 },
+    /// bucle ya marcado: moverlo (0), borde izquierdo (1) o derecho (2); `x0`: compás donde se agarró
+    LoopMod { modo: u8, a0: u32, b0: u32, x0: f32 },
+    /// varios clips a la vez: (tipo, índice, pista, inicio) de cada uno al empezar
+    Grupo { orig: Vec<(Kind, usize, u32, u32)>, s0: i32, tr0: i32, hay_pat: bool, moved: bool },
+    /// recuadro de selección: esquina donde empezó (relativa al lienzo) y lo que ya estaba elegido (con Ctrl)
+    Caja { a: Vec2, base: Vec<(Kind, usize)> },
 }
 
 pub(super) struct PlMenu {
@@ -316,6 +333,14 @@ pub(super) fn cadena_master(estilo: usize, int: f32, eq3: [f32; 3]) -> ([Band; 6
 
 pub(super) const MASTER_TARGETS: [(&str, f32); 4] = [("Streaming (-14 LUFS)", -14.0), ("Fuerte / club (-9 LUFS)", -9.0), ("Dinámico (-16 LUFS)", -16.0), ("Lo-fi cálido (-12 LUFS)", -12.0)];
 
+fn intensidad_ruido_def() -> f32 {
+    0.7
+}
+
+fn si() -> bool {
+    true
+}
+
 fn ago(secs: u64) -> String {
     match secs {
         0..=59 => "hace un momento".into(),
@@ -324,7 +349,7 @@ fn ago(secs: u64) -> String {
         _ => format!("hace {} días", secs / 86_400),
     }
 }
-fn now_secs() -> u64 {
+pub(super) fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
@@ -923,7 +948,7 @@ impl StudioApp {
     /// Primera pista sin clips entre [start, start+len).
     pub(super) fn free_track(&self, start: u32, len: u32) -> u32 {
         for t in 0..64u32 {
-            let busy = self.p.playlist.iter().any(|c| c.track == t && self.p.pattern(c.pat).is_some_and(|p| c.bar * 16 < start + len && (c.bar + p.bars) * 16 > start))
+            let busy = self.p.playlist.iter().any(|c| c.track == t && self.p.pattern(c.pat).is_some_and(|p| c.inicio() < start + len && c.inicio() + p.bars * 16 > start))
                 || self.p.audio_clips.iter().any(|c| c.track == t && c.start < start + len && c.start + c.len > start)
                 || self.p.autos.iter().any(|c| c.track == t && c.start < start + len && c.start + c.len > start);
             if !busy {
@@ -958,6 +983,14 @@ impl StudioApp {
                 self.p.punch = !pn;
                 self.send();
             }
+            let n_eleg = self.pistas_elegidas().len();
+            if n_eleg > 0 {
+                let on = self.solo_de_elegidas();
+                let txt = if n_eleg == 1 { "Solo esta pista".to_string() } else { format!("Solo estas {n_eleg} pistas") };
+                if ui.add(egui::Button::selectable(on, txt)).on_hover_text("Que suenen solo las pistas elegidas (Shift+S). Otra vez: vuelven a sonar todas").clicked() {
+                    self.solo_elegidas();
+                }
+            }
             if ui.button("Alejar").on_hover_text("Ver más compases (Ctrl + rueda)").clicked() {
                 self.pl_bw = (self.pl_bw / 1.3).max(16.0);
             }
@@ -975,7 +1008,7 @@ impl StudioApp {
             }
             if self.settings.ayudas {
                 if !self.plat.mobile {
-                    ui.label(RichText::new("Clic: patrón · arrastrar clip: mover · arrastrar fondo o rueda apretada: mover la vista · borde: largo · clic derecho: menú · regla: bucle").small().color(DIM));
+                    ui.label(RichText::new("Clic: elegir · arrastrar el fondo: recuadro para elegir varios · rueda apretada o Espacio: mover la vista · regla: arrastra el bucle para moverlo o estirarlo · franja de abajo: cabezal · clic derecho: menú").small().color(DIM));
                 }
             }
         });
@@ -985,28 +1018,63 @@ impl StudioApp {
     fn cabeceras_pista(&mut self, ui: &mut Ui, rect: Rect, org: Pos2, tn: f32, rul: f32) {
         let clip = ui.clip_rect().intersect(rect);
         let hx = clip.left().max(rect.left());
-        let hp = ui.painter().with_clip_rect(clip);
+        // las filas se dibujan debajo de la regla fija; la esquina, en su lugar de arriba
+        let mut debajo = clip;
+        debajo.min.y = debajo.min.y.max(clip.top().max(rect.top()) + rul);
+        let hp = ui.painter().with_clip_rect(debajo);
+        let hp_esq = ui.painter().with_clip_rect(clip);
         let ntr = self.p.tracks.len();
         let solo_alguna = self.p.pistas.iter().any(|p| p.solo);
         let mut cambio = false;
         let ambar = Color32::from_rgb(248, 198, 62);
+        // arrastrando sobre las cabeceras: se eligen todas las pistas entre donde empezó y el cursor
+        if let Some(a) = self.pl_rango {
+            if ui.input(|i| i.pointer.primary_down()) {
+                if let Some(pp) = ui.input(|i| i.pointer.interact_pos()) {
+                    let b = (((pp.y - org.y) / TH).floor().max(0.0) as u32).min(ntr.saturating_sub(1) as u32);
+                    self.elegir_rango(a, b);
+                }
+            } else {
+                self.pl_rango = None;
+                let n = self.pistas_elegidas().len();
+                if n > 1 {
+                    self.msg = format!("{n} pistas elegidas · Shift+S o «Solo estas»: que suenen solo esas · Supr: borrarlas");
+                }
+            }
+        }
+        let elegidas = self.pistas_elegidas();
         for t in 0..ntr {
             let y0 = org.y + t as f32 * TH;
             let hr = Rect::from_min_size(Pos2::new(hx, y0), Vec2::new(tn, TH));
             if !clip.intersects(hr) {
                 continue;
             }
-            let fondo = ui.interact(hr, ui.id().with(("pista_cab", t)), Sense::click_and_drag());
-            if fondo.dragged() {
-                // arrastrar la columna de pistas sube y baja la playlist (ahí nunca hay clips)
+            let tapada = hr.bottom() <= clip.top().max(rect.top()) + rul;
+            let fondo = ui.interact(hr, ui.id().with(("pista_cab", t)), if tapada { Sense::hover() } else { Sense::click_and_drag() }).on_hover_text("Clic: elegir la pista · arrastrar o Ctrl/Shift+clic: elegir varias · Supr: borrar · Ctrl+C / Ctrl+D: copiar / duplicar · Shift+S: que suenen solo esas · doble clic: renombrar");
+            if fondo.drag_started_by(egui::PointerButton::Primary) && !self.plat.mobile {
+                // en la PC, arrastrar sobre las cabeceras elige varias pistas (como con el cursor)
+                self.pl_rango = Some(t as u32);
+                self.elegir_pista(t as u32);
+            }
+            if fondo.dragged() && self.plat.mobile {
+                // en el teléfono, arrastrar la columna de pistas sube y baja la playlist (ahí nunca hay clips)
                 let dt = ui.input(|i| i.stable_dt).clamp(0.004, 0.05);
                 let dy = fondo.drag_delta().y;
                 let actual = ui.clip_rect().min - rect.min;
                 self.pl_mover = Some(Vec2::new(actual.x, actual.y - dy));
                 self.pl_vel = self.pl_vel * 0.5 + Vec2::new(0.0, dy / dt) * 0.5;
                 self.pl_manual = ui.input(|i| i.time);
-                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                cursor_mano(ui.ctx(), true);
             }
+            // clic en la cabecera: elegir la pista (Ctrl suma, Shift elige un tramo); doble clic: renombrarla
+            if fondo.double_clicked() {
+                self.elegir_pista(t as u32);
+                self.pl_renombrar = Some((t as u32, self.p.tracks[t].clone(), true));
+            } else if fondo.clicked() {
+                let (ctrl, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
+                self.elegir_pista_con(t as u32, ctrl, shift);
+            }
+            let elegida = elegidas.contains(&(t as u32));
             let pista = self.p.pista(t);
             let suena = !(pista.mute || (solo_alguna && !pista.solo));
             if !suena {
@@ -1014,13 +1082,25 @@ impl StudioApp {
                 let carril = Rect::from_min_size(Pos2::new(org.x, y0), Vec2::new(rect.right() - org.x, TH));
                 hp.rect_filled(carril, 0, Color32::from_black_alpha(90));
             }
-            hp.rect_filled(hr, 0, if fondo.hovered() { Color32::from_gray(32) } else { Color32::from_gray(26) });
+            let v = if elegida { self.pl_sel_vis } else { 0.0 };
+            if v > 0.0 {
+                // carril de la pista elegida: un velo claro y bordes blancos arriba y abajo
+                let carril = Rect::from_min_size(Pos2::new(org.x, y0), Vec2::new(rect.right() - org.x, TH));
+                hp.rect_filled(carril, 0, Color32::from_white_alpha((22.0 * v) as u8));
+                hp.hline(carril.x_range(), carril.top() + 0.5, Stroke::new(1.0, Color32::from_white_alpha((140.0 * v) as u8)));
+                hp.hline(carril.x_range(), carril.bottom() - 0.5, Stroke::new(1.0, Color32::from_white_alpha((140.0 * v) as u8)));
+            }
+            let base_cab = if fondo.hovered() { Color32::from_gray(32) } else { Color32::from_gray(26) };
+            hp.rect_filled(hr, 0, lerp_col(base_cab, Color32::from_gray(50), v));
             hp.hline(hr.x_range(), hr.bottom() - 0.5, Stroke::new(1.0, Color32::from_gray(15)));
             hp.vline(hr.right() - 0.5, hr.y_range(), Stroke::new(1.0, Color32::from_gray(15)));
             // color de la pista: el de su primer clip
             let tiene_audio = self.p.audio_clips.iter().any(|c| c.track as usize == t);
             let col = self.p.playlist.iter().find(|c| c.track as usize == t).and_then(|c| self.p.pattern(c.pat)).map(|p| c32(p.color)).unwrap_or(if tiene_audio { ACCENT } else { Color32::from_gray(76) });
             hp.rect_filled(Rect::from_min_size(hr.min, Vec2::new(3.0, TH)), 0, if suena { col } else { col.gamma_multiply(0.4) });
+            if v > 0.0 {
+                hp.rect_stroke(hr.shrink(0.5), 0, Stroke::new(1.0, Color32::from_white_alpha((190.0 * v) as u8)), StrokeKind::Inside);
+            }
             // ícono: micrófono (audio) o nota (patrones)
             let ic = Pos2::new(hr.left() + 17.0, y0 + 19.0);
             let tinta = if suena { ACCENT2 } else { DIM };
@@ -1110,13 +1190,14 @@ impl StudioApp {
             presp.on_hover_text(format!("Paneo: {pt} · doble clic: al centro"));
         }
         // esquina de arriba: «+ Añadir pista»
-        let esq = Rect::from_min_size(Pos2::new(hx, rect.top()), Vec2::new(tn, rul));
-        hp.rect_filled(esq, 0, Color32::from_gray(19));
-        hp.vline(esq.right() - 0.5, esq.y_range(), Stroke::new(1.0, Color32::from_gray(15)));
-        let br = Rect::from_min_size(Pos2::new(esq.left() + 8.0, esq.top() + 3.0), Vec2::new(122.0, rul - 6.0));
+        let esq = Rect::from_min_size(Pos2::new(hx, clip.top().max(rect.top())), Vec2::new(tn, rul));
+        hp_esq.rect_filled(esq, 0, Color32::from_gray(19));
+        hp_esq.vline(esq.right() - 0.5, esq.y_range(), Stroke::new(1.0, Color32::from_gray(15)));
+        hp_esq.hline(esq.x_range(), esq.bottom() - 0.5, Stroke::new(1.0, Color32::from_gray(46)));
+        let br = Rect::from_center_size(Pos2::new(esq.left() + 8.0 + 61.0, esq.center().y), Vec2::new(122.0, 24.0));
         let bresp = ui.interact(br, ui.id().with("pista_nueva"), Sense::click());
-        hp.rect_filled(br, 11, if bresp.hovered() { Color32::from_gray(56) } else { Color32::from_gray(41) });
-        hp.text(br.center(), Align2::CENTER_CENTER, "+  Añadir pista", FontId::proportional(12.0), Color32::WHITE);
+        hp_esq.rect_filled(br, 11, if bresp.hovered() { Color32::from_gray(56) } else { Color32::from_gray(41) });
+        hp_esq.text(br.center(), Align2::CENTER_CENTER, "+  Añadir pista", FontId::proportional(12.0), Color32::WHITE);
         if bresp.clicked() {
             self.snap();
             let n = self.p.tracks.len() as u32 + 1;
@@ -1134,12 +1215,32 @@ impl StudioApp {
         let song = self.p.song_bars();
         let bars = (song + 8).max(32);
         // cabeceras de pista más angostas en el teléfono
-        let (tn, rul) = (if self.plat.mobile { 168.0 } else { 236.0 }, 28.0);
+        let (tn, rul) = (if self.plat.mobile { 168.0 } else { 236.0 }, RUL_NUM + RUL_CAB);
         let ntr = self.p.tracks.len();
         let size = Vec2::new(tn + bars as f32 * bw, rul + ntr as f32 * TH);
         let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         let org = rect.min + Vec2::new(tn, rul);
+        // la regla queda fija arriba de lo que se ve (aunque bajes por las pistas)
+        let ry = ui.clip_rect().top().max(rect.top());
+        let en_regla = |p: Pos2| p.y >= ry && p.y < ry + RUL_NUM;
+        let en_franja = |p: Pos2| p.y >= ry + RUL_NUM && p.y < ry + rul;
+        let arriba = |p: Pos2| p.y < ry + rul;
+        // la selección se ve 2,5 s después de elegir (o de soltar un arrastre) y se desvanece en 0,6 s;
+        // sigue elegida aunque no se vea (Supr, Ctrl+C… siguen andando)
+        {
+            let ahora_s = ui.input(|i| i.time);
+            let firma = format!("{:?}{:?}{:?}", self.pl_sel, self.pl_multi, self.pl_clips);
+            if firma != self.pl_sel_firma || self.pl_drag.is_some() {
+                self.pl_sel_firma = firma;
+                self.pl_sel_t = ahora_s;
+            }
+            let pasado = (ahora_s - self.pl_sel_t) as f32;
+            self.pl_sel_vis = if pasado < 2.5 { 1.0 } else { (1.0 - (pasado - 2.5) / 0.6).clamp(0.0, 1.0) };
+            if self.pl_sel.is_some() && self.pl_sel_vis > 0.0 {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(if self.pl_sel_vis < 1.0 { 16 } else { 200 }));
+            }
+        }
         self.pl_org = org;
         self.pl_rect = Some(ui.clip_rect().intersect(rect));
         self.tut_mark("playlist", ui.clip_rect().intersect(rect));
@@ -1149,31 +1250,25 @@ impl StudioApp {
             painter.rect_filled(r, 0, if t % 2 == 0 { Color32::from_gray(31) } else { Color32::from_gray(27) });
             painter.hline(rect.left()..=rect.right(), r.bottom() - 0.5, Stroke::new(1.0, Color32::from_gray(20)));
         }
-        painter.rect_filled(Rect::from_min_size(rect.min, Vec2::new(rect.width(), rul)), 0, Color32::from_gray(19));
-        painter.hline(rect.x_range(), rect.top() + rul - 0.5, Stroke::new(1.0, Color32::from_gray(44)));
-        // región de bucle / punch
-        if self.p.loop_b > self.p.loop_a {
+        // región de bucle / punch (tinte en los carriles; la barra va en la regla)
+        if self.p.loop_b > self.p.loop_a && (self.p.loop_on || self.p.punch) {
             let x0 = org.x + self.p.loop_a as f32 * bw;
             let x1 = org.x + self.p.loop_b as f32 * bw;
-            let on = self.p.loop_on || self.p.punch;
             let col = if self.p.punch { Color32::from_rgb(200, 70, 70) } else { ACCENT };
-            painter.rect_filled(Rect::from_min_max(Pos2::new(x0, rect.top() + 2.0), Pos2::new(x1, rect.top() + rul - 2.0)), 3, col.gamma_multiply(if on { 0.55 } else { 0.18 }));
-            if on {
-                painter.rect_filled(Rect::from_min_max(Pos2::new(x0, org.y), Pos2::new(x1, rect.bottom())), 0, col.gamma_multiply(0.06));
-            }
+            painter.rect_filled(Rect::from_min_max(Pos2::new(x0, org.y), Pos2::new(x1, rect.bottom())), 0, col.gamma_multiply(0.06));
         }
         for b in 0..=bars {
             let x = org.x + b as f32 * bw;
-            painter.vline(x, org.y..=rect.bottom(), Stroke::new(1.0, if b % 4 == 0 { Color32::from_gray(17) } else { Color32::from_gray(23) }));
-            if b < bars {
-                painter.vline(x, (rect.top() + rul - 9.0)..=(rect.top() + rul), Stroke::new(1.0, Color32::from_gray(76)));
-                painter.text(Pos2::new(x + 4.0, rect.top() + 13.0), Align2::LEFT_CENTER, format!("{}", b + 1), FontId::proportional(12.0), if b < song { Color32::WHITE } else { Color32::from_gray(64) });
+            // líneas de cada tiempo, como las marquitas de la franja del cabezal (si caben)
+            if b < bars && bw >= 32.0 {
+                for k in 1..4 {
+                    painter.vline(x + k as f32 * bw / 4.0, org.y..=rect.bottom(), Stroke::new(1.0, Color32::from_black_alpha(55)));
+                }
             }
+            painter.vline(x, org.y..=rect.bottom(), Stroke::new(1.0, if b % 4 == 0 { Color32::from_gray(17) } else { Color32::from_gray(23) }));
         }
-        let pf = org.x + self.play_from as f32 * spx;
-        painter.add(egui::Shape::convex_polygon(vec![Pos2::new(pf - 5.0, rect.top() + rul - 8.0), Pos2::new(pf + 5.0, rect.top() + rul - 8.0), Pos2::new(pf, rect.top() + rul)], ACCENT2, Stroke::NONE));
         // clips de patrón
-        let pat_rect = |cl: &Clip, p: &Pattern| Rect::from_min_size(Pos2::new(org.x + cl.bar as f32 * bw + 1.0, org.y + cl.track as f32 * TH + 2.0), Vec2::new(p.bars as f32 * bw - 2.0, TH - 4.0));
+        let pat_rect = |cl: &Clip, p: &Pattern| Rect::from_min_size(Pos2::new(org.x + cl.inicio() as f32 * spx + 1.0, org.y + cl.track as f32 * TH + 2.0), Vec2::new(p.bars as f32 * bw - 2.0, TH - 4.0));
         let step_rect = |track: u32, start: u32, len: u32| Rect::from_min_size(Pos2::new(org.x + start as f32 * spx + 1.0, org.y + track as f32 * TH + 2.0), Vec2::new((len as f32 * spx - 2.0).max(4.0), TH - 4.0));
         // posición animada de un clip: se desliza en 0,12 s hacia su lugar (relativa al lienzo, así
         // desplazar la vista no la anima)
@@ -1184,7 +1279,8 @@ impl StudioApp {
         let ahora_z = ui.input(|i| i.time);
         let t_zoom = if (bw_prev - bw).abs() > 1e-3 { ahora_z } else { t_zoom };
         ui.ctx().data_mut(|d| d.insert_temp(id_zoom, (bw, t_zoom)));
-        let anim = if ahora_z - t_zoom < 0.25 { 0.0 } else { 0.12 };
+        // un poco más lento: los clips se deslizan suave a su lugar
+        let anim = if ahora_z - t_zoom < 0.25 { 0.0 } else { 0.16 };
         let suave = |clave: egui::Id, r: Rect| -> Rect {
             let rel = r.min - org;
             let x = ctx_a.animate_value_with_time(clave.with("x"), rel.x, anim);
@@ -1192,9 +1288,77 @@ impl StudioApp {
             let w = ctx_a.animate_value_with_time(clave.with("w"), r.width(), anim);
             Rect::from_min_size(org + Vec2::new(x, y), Vec2::new(w, r.height()))
         };
-        for (ci, cl) in self.p.playlist.iter().enumerate() {
-            let Some(p) = self.p.pattern(cl.pat) else { continue };
-            let r = suave(egui::Id::new(("clip_pat", ci)), pat_rect(cl, p));
+        // el clip que arrastras se levanta: se dibuja al final (encima de todos), un poco más grande,
+        // más arriba, con sombra y borde blanco; al soltarlo baja suave a su lugar
+        let arrastrando: Option<(Kind, u32)> = match &self.pl_drag {
+            Some(PlDrag::Pat { idx, .. }) => Some((Kind::Pat, *idx as u32)),
+            Some(PlDrag::Move { kind, id, .. }) => Some((*kind, *id)),
+            _ => None,
+        };
+        let id_lev = egui::Id::new("pl_clip_levantado");
+        if let Some(a) = arrastrando {
+            ui.ctx().data_mut(|d| d.insert_temp(id_lev, (a.0 as u8, a.1)));
+        }
+        let t_arr = ui.ctx().animate_bool_with_time(id_lev, arrastrando.is_some(), 0.14);
+        let levantado: Option<(Kind, u32, f32)> = ui.ctx().data(|d| d.get_temp::<(u8, u32)>(id_lev)).filter(|_| t_arr > 0.0).map(|(k, i)| {
+            let k = match k {
+                0 => Kind::Pat,
+                1 => Kind::Audio,
+                _ => Kind::Auto,
+            };
+            (k, i, t_arr)
+        });
+        let es_lev = |k: Kind, i: u32| levantado.is_some_and(|(lk, li, _)| lk == k && li == i);
+        // arrastre fluido: mientras arrastras, el clip sigue al mouse sin saltar de casilla en casilla
+        // (lo que suena ya está en la casilla de la rejilla); al soltar se desliza a esa casilla
+        let mov = ui.input(|i| match (i.pointer.press_origin(), i.pointer.interact_pos()) {
+            (Some(a), Some(b)) if i.pointer.primary_down() => b - a,
+            _ => Vec2::ZERO,
+        });
+        let libre_de = |t0: u32, s0: u32, t1: u32, s1: u32| -> Vec2 {
+            let x = (s0 as f32 * spx + mov.x).max(0.0);
+            let y = (t0 as f32 * TH + mov.y).clamp(0.0, (ntr.max(1) - 1) as f32 * TH);
+            Vec2::new(x - s1 as f32 * spx, y - t1 as f32 * TH)
+        };
+        let libres: Vec<((Kind, u32), Vec2)> = match &self.pl_drag {
+            Some(PlDrag::Pat { idx, orig, .. }) => self.p.playlist.get(*idx).map(|c| vec![((Kind::Pat, *idx as u32), libre_de(orig.track, orig.inicio(), c.track, c.inicio()))]).unwrap_or_default(),
+            Some(PlDrag::Move { kind, id, start, track, .. }) => {
+                let ahora = match kind {
+                    Kind::Audio => self.p.audio_clips.iter().find(|c| c.id == *id).map(|c| (c.track, c.start)),
+                    _ => self.p.autos.iter().find(|c| c.id == *id).map(|c| (c.track, c.start)),
+                };
+                ahora.map(|(t1, s1)| vec![((*kind, *id), libre_de(*track, *start, t1, s1))]).unwrap_or_default()
+            }
+            Some(PlDrag::Grupo { orig, .. }) => orig
+                .iter()
+                .filter_map(|&(k, i, t0, s0)| {
+                    let (t1, s1, _) = self.lugar_de_clip(k, i)?;
+                    let clave = if k == Kind::Pat { i as u32 } else { self.id_de_clip(k, i) };
+                    Some(((k, clave), libre_de(t0, s0, t1, s1)))
+                })
+                .collect(),
+            _ => vec![],
+        };
+        let desfase = |k: Kind, clave: u32| libres.iter().find(|l| l.0 == (k, clave)).map(|l| l.1).unwrap_or(Vec2::ZERO);
+        if !libres.is_empty() {
+            ui.ctx().request_repaint();
+        }
+        let levantar = |painter: &egui::Painter, r: Rect, t: f32| -> Rect {
+            if t <= 0.0 {
+                return r;
+            }
+            let r2 = r.expand(2.0 * t).translate(Vec2::new(0.0, -3.0 * t));
+            painter.rect_filled(r2.translate(Vec2::new(0.0, 7.0 * t)).expand(1.0), 7, Color32::from_black_alpha((130.0 * t) as u8));
+            r2
+        };
+        let borde_levantado = |painter: &egui::Painter, r: Rect, t: f32| {
+            if t > 0.0 {
+                painter.rect_stroke(r, 6, Stroke::new(1.8, Color32::from_white_alpha((235.0 * t) as u8)), StrokeKind::Outside);
+            }
+        };
+        let dibujar_pat = |painter: &egui::Painter, ci: usize, cl: &Clip, t: f32| {
+            let Some(p) = self.p.pattern(cl.pat) else { return };
+            let r = levantar(painter, suave(egui::Id::new(("clip_pat", ci)), pat_rect(cl, p).translate(desfase(Kind::Pat, ci as u32))), t);
             let c = c32(p.color);
             painter.rect_filled(r, 5, lerp_col(c, BG, 0.5));
             let banda = Rect::from_min_size(r.min, Vec2::new(r.width(), 16.0));
@@ -1202,11 +1366,17 @@ impl StudioApp {
             painter.with_clip_rect(banda.intersect(painter.clip_rect())).text(banda.left_center() + Vec2::new(5.0, 0.0), Align2::LEFT_CENTER, &p.name, FontId::proportional(11.0), Color32::WHITE);
             painter.rect_stroke(r, 5, Stroke::new(1.0, lerp_col(c, BG, 0.2)), StrokeKind::Inside);
             draw_pattern_preview(&painter, Rect::from_min_max(Pos2::new(r.left() + 1.0, r.top() + 18.0), r.right_bottom() - Vec2::new(1.0, 3.0)), p);
+            borde_levantado(painter, r, t);
+        };
+        for (ci, cl) in self.p.playlist.iter().enumerate() {
+            if !es_lev(Kind::Pat, ci as u32) {
+                dibujar_pat(&painter, ci, cl, 0.0);
+            }
         }
         // clips de audio
         let ss = self.p.step_secs() as f32;
-        for cl in &self.p.audio_clips {
-            let r = suave(egui::Id::new(("clip_audio", cl.id)), step_rect(cl.track, cl.start, cl.len));
+        let dibujar_audio = |painter: &egui::Painter, cl: &AudioClip, t: f32| {
+            let r = levantar(painter, suave(egui::Id::new(("clip_audio", cl.id)), step_rect(cl.track, cl.start, cl.len).translate(desfase(Kind::Audio, cl.id))), t);
             let chn = self.p.channel(cl.ch);
             // como en BandLab: cuerpo azul, banda con el nombre y onda celeste llena
             let cuerpo = Color32::from_rgb(30, 86, 172);
@@ -1260,6 +1430,12 @@ impl StudioApp {
                 let w = (cl.fade_out / ss * spx).min(r.width());
                 painter.line_segment([Pos2::new(r.right() - w, r.top()), r.right_bottom()], Stroke::new(1.0, Color32::from_black_alpha(160)));
             }
+            borde_levantado(painter, r, t);
+        };
+        for cl in &self.p.audio_clips {
+            if !es_lev(Kind::Audio, cl.id) {
+                dibujar_audio(&painter, cl, 0.0);
+            }
         }
         // grabación en curso
         if let Some(tr) = &self.rec_track {
@@ -1284,8 +1460,8 @@ impl StudioApp {
             painter.with_clip_rect(r.intersect(painter.clip_rect())).text(r.left_top() + Vec2::new(5.0, 3.0), Align2::LEFT_TOP, format!("GRABANDO{vueltas}"), FontId::proportional(11.0), Color32::WHITE);
         }
         // automatización
-        for a in &self.p.autos {
-            let r = suave(egui::Id::new(("clip_auto", a.id)), step_rect(a.track, a.start, a.len));
+        let dibujar_auto = |painter: &egui::Painter, a: &AutoClip, t: f32| {
+            let r = levantar(painter, suave(egui::Id::new(("clip_auto", a.id)), step_rect(a.track, a.start, a.len).translate(desfase(Kind::Auto, a.id))), t);
             painter.rect(r, 4, Color32::from_gray(41), Stroke::new(1.0, Color32::from_rgb(130, 110, 190)), StrokeKind::Inside);
             let inner = r.shrink2(Vec2::new(2.0, 4.0));
             let mut pts = vec![];
@@ -1297,12 +1473,39 @@ impl StudioApp {
             painter.add(egui::Shape::line(pts, Stroke::new(1.5, Color32::from_rgb(190, 170, 250))));
             let name = a.target.channel().and_then(|c| self.p.channel(c)).map(|c| c.name.clone()).unwrap_or_else(|| "Master".into());
             painter.with_clip_rect(r.intersect(painter.clip_rect())).text(r.left_top() + Vec2::new(5.0, 2.0), Align2::LEFT_TOP, format!("{} · {}", name, self.auto_label(a.target)), FontId::proportional(10.5), Color32::from_rgb(220, 210, 255));
+            borde_levantado(painter, r, t);
+        };
+        for a in &self.p.autos {
+            if !es_lev(Kind::Auto, a.id) {
+                dibujar_auto(&painter, a, 0.0);
+            }
+        }
+        // el clip levantado, encima de todos
+        if let Some((k, i, t)) = levantado {
+            match k {
+                Kind::Pat => {
+                    if let Some(cl) = self.p.playlist.get(i as usize) {
+                        dibujar_pat(&painter, i as usize, cl, t);
+                    }
+                }
+                Kind::Audio => {
+                    if let Some(cl) = self.p.audio_clips.iter().find(|c| c.id == i) {
+                        dibujar_audio(&painter, cl, t);
+                    }
+                }
+                Kind::Auto => {
+                    if let Some(a) = self.p.autos.iter().find(|c| c.id == i) {
+                        dibujar_auto(&painter, a, t);
+                    }
+                }
+            }
+            if t < 1.0 {
+                ui.ctx().request_repaint();
+            }
         }
         // cabezal
         if self.song_mode && self.playing() {
             let x = org.x + (self.status.pos() / 16.0) as f32 * bw;
-            painter.vline(x, (rect.top() + 4.0)..=rect.bottom(), Stroke::new(1.5, Color32::WHITE));
-            painter.circle_filled(Pos2::new(x, rect.top() + 4.0), 4.0, Color32::WHITE);
             // la vista sigue a la canción como una cinta: cuando el cabezal pasa el tercio de lo visible,
             // se queda ahí y la playlist corre debajo un poquito en cada cuadro (sin saltos, suave también
             // en el teléfono). Si el cabezal queda fuera de la vista (por ejemplo al volver al inicio de un
@@ -1340,11 +1543,78 @@ impl StudioApp {
             }
         }
 
+        // ---------- regla fija arriba: números y bucle; debajo, la franja del cabezal ----------
+        {
+            let regla = Rect::from_min_max(Pos2::new(rect.left(), ry), Pos2::new(rect.right(), ry + RUL_NUM));
+            let franja = Rect::from_min_max(Pos2::new(rect.left(), ry + RUL_NUM), Pos2::new(rect.right(), ry + rul));
+            painter.rect_filled(regla, 0, Color32::from_gray(19));
+            painter.rect_filled(franja, 0, Color32::from_gray(24));
+            painter.hline(rect.x_range(), regla.bottom() - 0.5, Stroke::new(1.0, Color32::from_gray(33)));
+            painter.hline(rect.x_range(), franja.bottom() - 0.5, Stroke::new(1.0, Color32::from_gray(46)));
+            if self.p.loop_b > self.p.loop_a {
+                let x0 = org.x + self.p.loop_a as f32 * bw;
+                let x1 = org.x + self.p.loop_b as f32 * bw;
+                let on = self.p.loop_on || self.p.punch;
+                let col = if self.p.punch { Color32::from_rgb(200, 70, 70) } else { ACCENT };
+                painter.rect_filled(Rect::from_min_max(Pos2::new(x0, regla.top() + 3.0), Pos2::new(x1, regla.bottom() - 3.0)), 3, col.gamma_multiply(if on { 0.55 } else { 0.18 }));
+            }
+            for b in 0..bars {
+                let x = org.x + b as f32 * bw;
+                painter.vline(x, (regla.bottom() - 8.0)..=regla.bottom(), Stroke::new(1.0, Color32::from_gray(76)));
+                painter.text(Pos2::new(x + 4.0, regla.center().y - 1.0), Align2::LEFT_CENTER, format!("{}", b + 1), FontId::proportional(12.0), if b < song { Color32::WHITE } else { Color32::from_gray(64) });
+                // en la franja: una marquita por tiempo
+                for k in 0..4 {
+                    let xt = x + k as f32 * bw / 4.0;
+                    let alto = if k == 0 { 7.0 } else { 3.5 };
+                    painter.vline(xt, (franja.bottom() - alto)..=franja.bottom(), Stroke::new(1.0, Color32::from_gray(if k == 0 { 70 } else { 50 })));
+                }
+            }
+            // el cabezal: siempre a la vista (sonando, donde va; parado, desde donde va a sonar)
+            let sonando = self.song_mode && self.playing() && !self.pl_scrub;
+            let pasos = if sonando { self.status.pos() as f32 } else { self.play_from as f32 };
+            let x = org.x + pasos * spx;
+            let col = if sonando { Color32::WHITE } else { ACCENT2 };
+            if x >= org.x - 1.0 {
+                painter.vline(x, franja.bottom()..=rect.bottom(), Stroke::new(1.5, col));
+                let (y0, y1) = (franja.top() + 3.0, franja.bottom());
+                painter.add(egui::Shape::convex_polygon(
+                    vec![Pos2::new(x - 6.0, y0), Pos2::new(x + 6.0, y0), Pos2::new(x + 6.0, y1 - 6.0), Pos2::new(x, y1), Pos2::new(x - 6.0, y1 - 6.0)],
+                    col,
+                    Stroke::NONE,
+                ));
+            }
+            if let Some(p) = ui.input(|i| i.pointer.hover_pos()) {
+                if en_franja(p) && p.x > org.x.max(ui.clip_rect().left() + tn) && resp.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                }
+                // sobre el bucle: bordes = estirar; adentro = mano para moverlo
+                if en_regla(p) && resp.hovered() && self.p.loop_b > self.p.loop_a && self.pl_drag.is_none() {
+                    let (x0, x1) = (org.x + self.p.loop_a as f32 * bw, org.x + self.p.loop_b as f32 * bw);
+                    if (p.x - x0).abs() <= 7.0 || (p.x - x1).abs() <= 7.0 {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    } else if p.x > x0 && p.x < x1 {
+                        cursor_mano(ui.ctx(), false);
+                    }
+                }
+            }
+            match &self.pl_drag {
+                Some(PlDrag::LoopMod { modo: 0, .. }) => cursor_mano(ui.ctx(), true),
+                Some(PlDrag::LoopMod { .. }) | Some(PlDrag::Loop { .. }) => ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal),
+                _ => {}
+            }
+            if sonando {
+                ui.ctx().request_repaint();
+            }
+        }
+
         // ---------- cabeceras de pista: fijas a la izquierda, como en BandLab ----------
         self.cabeceras_pista(ui, rect, org, tn, rul);
 
         // ---------- interacción ----------
         let hit = |this: &Self, pos: Pos2| -> Option<(Kind, usize, Rect)> {
+            if arriba(pos) {
+                return None;
+            }
             for (i, a) in this.p.autos.iter().enumerate().rev() {
                 let r = step_rect(a.track, a.start, a.len);
                 if r.contains(pos) {
@@ -1384,7 +1654,7 @@ impl StudioApp {
             let abajo = ui.input(|i| i.pointer.primary_down());
             if self.pl_toque.is_none() && resp.is_pointer_button_down_on() {
                 if let (Some(p0), Some(t0)) = ui.input(|i| (i.pointer.press_origin(), i.pointer.press_start_time())) {
-                    if p0.y >= org.y && p0.x >= org.x {
+                    if !arriba(p0) && p0.x >= org.x {
                         let sobre = hit(self, p0).map(|(k, i, _)| (k, i, self.id_de_clip(k, i)));
                         let (st, tr) = self.pl_cell(p0);
                         self.pl_toque = Some(Toque { inicio: t0, pos0: p0, sobre, track: tr, step: st, movido: false, levantado: false, arrastrado: false });
@@ -1425,39 +1695,52 @@ impl StudioApp {
         }
         // tecla de mover la vista (Espacio) apretada: arrastrar mueve la vista en vez de editar
         let mano_abajo = self.mano.is_some() && self.atajo("mano").is_some_and(|a| ui.input(|i| a.abajo(i)));
-        if mano_abajo && resp.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        if mano_abajo && resp.hovered() && !self.pl_paneo {
+            cursor_mano(ui.ctx(), false);
         }
-        // tiempo apretando en la regla sin mover: a los 0,35 s se marca el bucle al arrastrar
-        let ahora_t = ui.input(|i| i.time);
-        let en_regla_desde = ui.input(|i| i.pointer.press_origin().filter(|p| p.y < org.y && rect.contains(*p)).and(i.pointer.press_start_time()));
-        let mantenido_regla = en_regla_desde.is_some_and(|t0| ahora_t - t0 >= 0.35);
-        if resp.drag_started() && dos_dedos.is_none() {
+        if resp.drag_started_by(egui::PointerButton::Primary) && dos_dedos.is_none() {
             if let Some(pos) = ui.input(|i| i.pointer.press_origin()) {
-                let (s, t) = self.pl_cell(pos);
+                let (_, t) = self.pl_cell(pos);
                 let raw_step = (((pos.x - org.x) / spx).max(0.0)) as i32;
-                if mano_abajo {
+                if en_franja(pos) && !mano_abajo {
+                    // franja del cabezal: arrastrar mueve el cabezal
+                    self.pl_scrub = true;
+                } else if mano_abajo {
                     self.pl_paneo = true;
                     self.pl_paneo_h = false;
                     self.pl_vel = Vec2::ZERO;
                     self.mano = Some(true);
-                } else if pos.y < org.y && !mantenido_regla {
-                    // regla: arrastrar mueve de lado
-                    self.pl_paneo = true;
-                    self.pl_paneo_h = true;
-                    self.pl_vel = Vec2::ZERO;
-                } else if movil && pos.y >= org.y && !levantado_clip {
+                } else if en_regla(pos) {
+                    // regla: agarrar el bucle lo mueve; sus bordes lo achican o agrandan; fuera, se marca uno nuevo
+                    let bar_f = (pos.x - org.x) / bw;
+                    let (x0, x1) = (org.x + self.p.loop_a as f32 * bw, org.x + self.p.loop_b as f32 * bw);
+                    let hay = self.p.loop_b > self.p.loop_a;
+                    let (a0, b0) = (self.p.loop_a, self.p.loop_b);
+                    self.snap();
+                    self.pl_drag = Some(if hay && (pos.x - x0).abs() <= 7.0 {
+                        PlDrag::LoopMod { modo: 1, a0, b0, x0: bar_f }
+                    } else if hay && (pos.x - x1).abs() <= 7.0 {
+                        PlDrag::LoopMod { modo: 2, a0, b0, x0: bar_f }
+                    } else if hay && pos.x > x0 && pos.x < x1 {
+                        PlDrag::LoopMod { modo: 0, a0, b0, x0: bar_f }
+                    } else {
+                        let a = (bar_f.floor().max(0.0) as u32).min(999);
+                        self.p.loop_a = a;
+                        self.p.loop_b = a + 1;
+                        PlDrag::Loop { a }
+                    });
+                } else if movil && !arriba(pos) && !levantado_clip {
                     // teléfono: arrastrar con un dedo mueve la vista (también encima de clips)
                     self.pl_paneo = true;
                     self.pl_paneo_h = false;
                     self.pl_vel = Vec2::ZERO;
-                } else if pos.y < org.y {
-                    // regla mantenida y luego arrastrada: marca el bucle
-                    let a = (s / 16).min(999);
+                } else if let Some((k, i, _)) = hit(self, pos).filter(|h| !movil && self.clips_elegidos().len() > 1 && self.clips_elegidos().contains(&(h.0, h.1))) {
+                    // agarrar uno de los clips elegidos: se mueven todos juntos
+                    let _ = (k, i);
                     self.snap();
-                    self.p.loop_a = a;
-                    self.p.loop_b = a + 1;
-                    self.pl_drag = Some(PlDrag::Loop { a });
+                    let orig: Vec<(Kind, usize, u32, u32)> = self.clips_elegidos().iter().filter_map(|&(gk, gi)| self.lugar_de_clip(gk, gi).map(|(gt, gs, _)| (gk, gi, gt, gs))).collect();
+                    let hay_pat = orig.iter().any(|o| o.0 == Kind::Pat);
+                    self.pl_drag = Some(PlDrag::Grupo { orig, s0: raw_step, tr0: t as i32, hay_pat, moved: false });
                 } else if let Some((k, i, r)) = hit(self, pos) {
                     self.snap();
                     if let Some(t) = &mut self.pl_toque {
@@ -1468,7 +1751,8 @@ impl StudioApp {
                     match k {
                         Kind::Pat => {
                             let b = ((pos.x - org.x) / bw).floor() as i32;
-                            self.pl_drag = Some(PlDrag::Pat { idx: i, bar0: b, tr0: t as i32, orig: self.p.playlist[i], moved: false });
+                            let _ = b;
+                            self.pl_drag = Some(PlDrag::Pat { idx: i, bar0: raw_step, tr0: t as i32, orig: self.p.playlist[i], moved: false });
                         }
                         Kind::Audio => {
                             let c = &self.p.audio_clips[i];
@@ -1486,10 +1770,10 @@ impl StudioApp {
                         }
                     }
                 } else if pos.x > ui.clip_rect().left() + tn {
-                    // fondo vacío: arrastrar mueve la vista (de lado y de arriba abajo a la vez)
-                    self.pl_paneo = true;
-                    self.pl_paneo_h = false;
-                    self.pl_vel = Vec2::ZERO;
+                    // fondo vacío: recuadro de selección (la vista se mueve con la rueda apretada o con Espacio)
+                    let suma = ui.input(|i| i.modifiers.command || i.modifiers.shift);
+                    let base = if suma { self.clips_elegidos() } else { vec![] };
+                    self.pl_drag = Some(PlDrag::Caja { a: pos - rect.min, base });
                 }
             }
         }
@@ -1537,18 +1821,48 @@ impl StudioApp {
                 }
             }
             if self.pl_paneo || medio {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                cursor_mano(ui.ctx(), true);
             }
-            // apretando la regla sin mover: aviso de que ya se puede marcar el bucle
-            if resp.is_pointer_button_down_on() && !resp.dragged() && en_regla_desde.is_some() {
-                if mantenido_regla {
-                    if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
-                        let x0 = org.x + ((p.x - org.x) / bw).floor().max(0.0) * bw;
-                        painter.rect_filled(Rect::from_min_max(Pos2::new(x0, rect.top() + 2.0), Pos2::new(x0 + bw, rect.top() + rul - 2.0)), 3, ACCENT.gamma_multiply(0.6));
-                        painter.text(Pos2::new(x0 + bw + 6.0, rect.top() + rul * 0.5), Align2::LEFT_CENTER, "arrastra para marcar el bucle", FontId::proportional(11.0), ACCENT);
+        }
+        if self.pl_scrub {
+            let paso = |x: f32, this: &Self| -> u32 {
+                let s = (((x - org.x) / spx).max(0.0)) as u32;
+                let g = this.snap_steps.max(1);
+                (s + g / 2) / g * g
+            };
+            if resp.dragged() {
+                if let Some(pos) = resp.interact_pointer_pos() {
+                    self.play_from = paso(pos.x, self);
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                }
+            } else {
+                // al soltar: si está sonando, sigue desde ahí
+                self.pl_scrub = false;
+                if !self.song_mode {
+                    self.set_song_mode(true);
+                }
+                if self.playing() {
+                    self.play(self.play_from);
+                }
+                self.pl_seguir = None;
+            }
+        }
+        // recuadro de selección: elige lo que toca (si no toca clips, las pistas que abarca)
+        if let Some(PlDrag::Caja { a, base }) = &self.pl_drag {
+            if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+                let (a, base) = (*a, base.clone());
+                let caja = Rect::from_two_pos(rect.min + a, pos);
+                let mut v = base.clone();
+                for c in self.clips_en_recuadro(caja, org, spx) {
+                    if !v.contains(&c) {
+                        v.push(c);
                     }
-                } else {
-                    ui.ctx().request_repaint();
+                }
+                if v.is_empty() && caja.width() > 4.0 && caja.height() > 4.0 {
+                    let fila = |y: f32| (((y - org.y) / TH).floor().max(0.0) as u32).min(ntr.saturating_sub(1) as u32);
+                    self.elegir_rango(fila(caja.top()), fila(caja.bottom()));
+                } else if !v.is_empty() {
+                    self.elegir_clips(&v);
                 }
             }
         }
@@ -1559,6 +1873,69 @@ impl StudioApp {
                 let (_, t) = self.pl_cell(pos);
                 let mut changed = false;
                 match self.pl_drag.as_mut().unwrap() {
+                    PlDrag::Caja { .. } => {}
+                    PlDrag::LoopMod { modo, a0, b0, x0 } => {
+                        let bar_f = (pos.x - org.x) / bw;
+                        let (na, nb) = match *modo {
+                            0 => {
+                                let d = (bar_f - *x0).round() as i32;
+                                let a = (*a0 as i32 + d).max(0) as u32;
+                                (a, a + (*b0 - *a0))
+                            }
+                            1 => ((bar_f.round().max(0.0) as u32).min(*b0 - 1), *b0),
+                            _ => (*a0, (bar_f.round().max(0.0) as u32).max(*a0 + 1)),
+                        };
+                        if self.p.loop_a != na || self.p.loop_b != nb {
+                            self.p.loop_a = na;
+                            self.p.loop_b = nb;
+                            changed = true;
+                        }
+                    }
+                    PlDrag::Grupo { orig, s0, tr0, hay_pat, moved } => {
+                        let _ = hay_pat;
+                        let paso = snap;
+                        let min_s = orig.iter().map(|o| o.3).min().unwrap_or(0) as i32;
+                        let d = (((raw - *s0) as f32 / paso as f32).round() as i32 * paso).max(-min_s);
+                        let tmin = orig.iter().map(|o| o.2).min().unwrap_or(0) as i32;
+                        let tmax = orig.iter().map(|o| o.2).max().unwrap_or(0) as i32;
+                        let dt = (t as i32 - *tr0).clamp(-tmin, ntr as i32 - 1 - tmax);
+                        for &(k, i, tr, st) in orig.iter() {
+                            let ns = (st as i32 + d) as u32;
+                            let nt = (tr as i32 + dt) as u32;
+                            match k {
+                                Kind::Pat => {
+                                    if let Some(c) = self.p.playlist.get_mut(i) {
+                                        if c.inicio() != ns || c.track != nt {
+                                            c.poner_inicio(ns);
+                                            c.track = nt;
+                                            changed = true;
+                                        }
+                                    }
+                                }
+                                Kind::Audio => {
+                                    if let Some(c) = self.p.audio_clips.get_mut(i) {
+                                        if c.start != ns || c.track != nt {
+                                            c.start = ns;
+                                            c.track = nt;
+                                            changed = true;
+                                        }
+                                    }
+                                }
+                                Kind::Auto => {
+                                    if let Some(c) = self.p.autos.get_mut(i) {
+                                        if c.start != ns || c.track != nt {
+                                            c.start = ns;
+                                            c.track = nt;
+                                            changed = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if changed {
+                            *moved = true;
+                        }
+                    }
                     PlDrag::Loop { a } => {
                         let b = ((pos.x - org.x) / bw).max(0.0).ceil() as u32;
                         let (x, y) = if b > *a { (*a, b) } else { (b.saturating_sub(1).min(*a), *a + 1) };
@@ -1569,12 +1946,13 @@ impl StudioApp {
                         }
                     }
                     PlDrag::Pat { idx, bar0, tr0, orig, moved } => {
-                        let b = ((pos.x - org.x) / bw).floor() as i32;
-                        let nb = (orig.bar as i32 + b - *bar0).max(0) as u32;
+                        // `bar0` guarda el paso donde se agarró
+                        let d = ((raw - *bar0) as f32 / snap as f32).round() as i32 * snap;
+                        let ns = (orig.inicio() as i32 + d).max(0) as u32;
                         let nt = (orig.track as i32 + t as i32 - *tr0).clamp(0, ntr as i32 - 1) as u32;
                         if let Some(cl) = self.p.playlist.get_mut(*idx) {
-                            if cl.bar != nb || cl.track != nt {
-                                cl.bar = nb;
+                            if cl.inicio() != ns || cl.track != nt {
+                                cl.poner_inicio(ns);
                                 cl.track = nt;
                                 *moved = true;
                                 changed = true;
@@ -1644,7 +2022,7 @@ impl StudioApp {
             }
             // clip arrastrado cerca del borde: la vista se desplaza sola hacia ese lado (más rápido cuanto
             // más cerca del borde), así lo puedes llevar a cualquier parte de la playlist
-            if matches!(self.pl_drag, Some(PlDrag::Pat { .. }) | Some(PlDrag::Move { .. })) {
+            if matches!(self.pl_drag, Some(PlDrag::Pat { .. }) | Some(PlDrag::Move { .. }) | Some(PlDrag::Grupo { .. }) | Some(PlDrag::Caja { .. })) {
                 if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
                     let vista = ui.clip_rect();
                     let zona = if self.plat.mobile { 60.0 } else { 40.0 };
@@ -1664,12 +2042,39 @@ impl StudioApp {
             if resp.drag_stopped() {
                 let d = self.pl_drag.take();
                 let moved = match &d {
-                    Some(PlDrag::Pat { moved, .. }) | Some(PlDrag::Move { moved, .. }) => *moved,
+                    Some(PlDrag::Pat { moved, .. }) | Some(PlDrag::Move { moved, .. }) | Some(PlDrag::Grupo { moved, .. }) => *moved,
                     _ => true,
                 };
-                if let Some(PlDrag::Loop { .. }) = d {
-                    self.p.loop_on = true;
-                    self.msg = format!("Bucle: compases {} a {}.", self.p.loop_a + 1, self.p.loop_b);
+                match &d {
+                    Some(PlDrag::Loop { .. }) | Some(PlDrag::LoopMod { .. }) => {
+                        self.p.loop_on = true;
+                        self.msg = format!("Bucle: compases {} a {}.", self.p.loop_a + 1, self.p.loop_b);
+                    }
+                    // lo movido sigue elegido en su lugar nuevo
+                    Some(PlDrag::Grupo { orig, .. }) => {
+                        let lista: Vec<(Kind, usize)> = orig.iter().map(|o| (o.0, o.1)).collect();
+                        self.elegir_clips(&lista);
+                    }
+                    Some(PlDrag::Pat { idx, .. }) => self.elegir_clip(Kind::Pat, *idx),
+                    Some(PlDrag::Move { kind, id, .. }) => {
+                        let i = match kind {
+                            Kind::Audio => self.p.audio_clips.iter().position(|c| c.id == *id),
+                            _ => self.p.autos.iter().position(|c| c.id == *id),
+                        };
+                        if let Some(i) = i {
+                            self.elegir_clip(*kind, i);
+                        }
+                    }
+                    Some(PlDrag::Caja { .. }) => {
+                        let n = self.clips_elegidos().len();
+                        let np = self.pistas_elegidas().len();
+                        if n > 1 {
+                            self.msg = format!("{n} clips elegidos · arrastra uno para moverlos todos · Supr borra · Ctrl+C copia · Ctrl+D duplica");
+                        } else if np > 1 {
+                            self.msg = format!("{np} pistas elegidas · Shift+S: que suenen solo esas");
+                        }
+                    }
+                    _ => {}
                 }
                 if !moved {
                     self.hist.pop();
@@ -1681,12 +2086,48 @@ impl StudioApp {
             if let Some(pos) = resp.interact_pointer_pos() {
                 self.pl_menu = None;
                 self.pl_barra = None;
-                if pos.y < org.y {
-                    let b = ((pos.x - org.x) / bw).floor().max(0.0) as u32;
-                    self.play_from = b * STEPS_PER_BAR;
-                    self.song_mode = true;
-                    self.play(b * STEPS_PER_BAR);
+                if en_franja(pos) {
+                    if pos.x >= org.x {
+                        let s = (((pos.x - org.x) / spx).max(0.0)) as u32;
+                        let g = self.snap_steps.max(1);
+                        self.play_from = (s + g / 2) / g * g;
+                        if !self.song_mode {
+                            self.set_song_mode(true);
+                        }
+                        if self.playing() {
+                            self.play(self.play_from);
+                        }
+                    }
+                } else if en_regla(pos) {
+                    // un clic sobre el bucle lo prende o lo apaga
+                    let (x0, x1) = (org.x + self.p.loop_a as f32 * bw, org.x + self.p.loop_b as f32 * bw);
+                    if self.p.loop_b > self.p.loop_a && pos.x > x0 && pos.x < x1 {
+                        self.snap();
+                        self.p.loop_on = !self.p.loop_on;
+                        self.send();
+                        self.msg = if self.p.loop_on { "Bucle encendido.".into() } else { "Bucle apagado.".into() };
+                    }
                 } else if pos.x >= org.x {
+                    // lo tocado queda elegido: el clip, o la pista si es un lugar vacío
+                    match hit(self, pos) {
+                        Some((k, i, _)) => {
+                            self.pl_destino = None;
+                            if ui.input(|i| i.modifiers.command || i.modifiers.shift) {
+                                self.alternar_clip(k, i);
+                            } else {
+                                self.elegir_clip(k, i);
+                            }
+                        }
+                        None => {
+                            let (st, t) = self.pl_cell(pos);
+                            let (ctrl, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
+                            self.elegir_pista_con(t, ctrl, shift);
+                            // el cuadro tocado queda marcado: Ctrl+V pega ahí
+                            if !ctrl && !shift {
+                                self.pl_destino = Some((t, st));
+                            }
+                        }
+                    }
                     match hit(self, pos) {
                         Some((Kind::Pat, i, _)) => {
                             let id = self.p.playlist[i].pat;
@@ -1707,7 +2148,7 @@ impl StudioApp {
         }
         if resp.double_clicked() && !mano_abajo && !toque_largo {
             if let Some(pos) = resp.interact_pointer_pos() {
-                if pos.y >= org.y && pos.x >= org.x {
+                if !arriba(pos) && pos.x >= org.x {
                     match hit(self, pos) {
                         // doble clic en un clip: editarlo
                         Some((k, i, _)) => self.editar_clip(k, i),
@@ -1717,7 +2158,7 @@ impl StudioApp {
                             let (_, t) = self.pl_cell(pos);
                             self.snap();
                             let pat = self.sel_pat;
-                            self.p.playlist.push(Clip { track: t, bar: b, pat });
+                            self.p.playlist.push(Clip { track: t, bar: b, pat, off: 0 });
                             self.msg = format!("Clip «{}» en el compás {}.", self.cur_pat().name, b + 1);
                             self.send();
                         }
@@ -1753,9 +2194,34 @@ impl StudioApp {
                 painter.rect_stroke(r, 7, Stroke::new(2.0, Color32::from_white_alpha((255.0 * t_lev) as u8)), StrokeKind::Outside);
             }
         }
+        // clips elegidos: borde blanco; y el recuadro de selección mientras se arrastra
+        {
+            let mut bajo_clip = painter.clip_rect();
+            bajo_clip.min.y = bajo_clip.min.y.max(ry + rul);
+            bajo_clip.min.x = bajo_clip.min.x.max(ui.clip_rect().left() + tn);
+            let bajo = painter.with_clip_rect(bajo_clip);
+            if resaltado.is_none() {
+                let v = self.pl_sel_vis;
+                if v > 0.0 {
+                    for (k, i) in self.clips_elegidos() {
+                        if let Some((tr, s, l)) = self.lugar_de_clip(k, i) {
+                            bajo.rect_stroke(step_rect(tr, s, l).expand(1.0), 6, Stroke::new(2.0, Color32::from_white_alpha((255.0 * v) as u8)), StrokeKind::Outside);
+                        }
+                    }
+                }
+            }
+            if let Some(PlDrag::Caja { a, .. }) = &self.pl_drag {
+                if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                    let caja = Rect::from_two_pos(rect.min + *a, p);
+                    bajo.rect_filled(caja, 2, Color32::from_white_alpha(16));
+                    bajo.rect_stroke(caja, 2, Stroke::new(1.0, Color32::from_white_alpha(150)), StrokeKind::Inside);
+                }
+            }
+        }
         if resp.secondary_clicked() && !movil {
             if let Some(pos) = resp.interact_pointer_pos() {
                 if let Some((k, i, _)) = hit(self, pos) {
+                    self.elegir_clip(k, i);
                     let id = match k {
                         Kind::Pat => self.p.playlist[i].pat,
                         Kind::Audio => self.p.audio_clips[i].id,
@@ -1763,7 +2229,7 @@ impl StudioApp {
                     };
                     let step = (((pos.x - org.x) / spx).max(0.0)) as u32;
                     self.pl_menu = Some(PlMenu { kind: k, id, idx: i, pos, step, opened: 0 });
-                } else if pos.y < org.y {
+                } else if arriba(pos) {
                     self.snap();
                     self.p.loop_on = !self.p.loop_on;
                     self.send();
@@ -2711,6 +3177,7 @@ impl StudioApp {
             None => self.play_from,
         };
         self.mic_mon = None;
+        self.ruido_sync();
         match audio::record(self.status.clone(), &self.settings.entrada, true, self.settings.canal_entrada as usize) {
             Ok(r) => {
                 if self.settings.metro_grabar {
@@ -2748,11 +3215,12 @@ impl StudioApp {
         self.status.playing.store(false, Ordering::Relaxed);
         let sr = tr.r.sr as f32;
         let data = tr.r.buf.lock().map(|b| b.clone()).unwrap_or_default();
+        let retraso = tr.r.retraso;
         drop(tr.r);
         let ss = self.p.step_secs() as f32;
         let lat = ((self.settings.latency_ms / 1000.0) * sr) as usize;
-        // se quita la latencia y el tramo de la precuenta
-        let data: Vec<f32> = data.into_iter().skip(lat + (tr.precuenta_s * sr) as usize).collect();
+        // se quita la latencia, el retraso del filtro de ruido y el tramo de la precuenta
+        let data: Vec<f32> = data.into_iter().skip(lat + retraso + (tr.precuenta_s * sr) as usize).collect();
         let total_steps = data.len() as f32 / sr / ss;
         let mut pieces: Vec<(u32, u32, Vec<f32>)> = vec![]; // inicio, largo (pasos), audio
         match tr.region {
@@ -3956,3 +4424,44 @@ pub(super) fn sc_sources(p: &Project, me: u32) -> Vec<(u32, String)> {
     p.channels.iter().filter(|c| c.id != me).map(|c| (c.id, c.name.clone())).collect()
 }
 
+
+/// Cursor de mano para mover la vista (Windows no tiene una mano de agarrar: la de egui sale como
+/// flechas en cruz). Se esconde el del sistema y se dibuja una mano blanca con borde negro, abierta
+/// al pasar por encima y cerrada mientras se arrastra.
+pub(super) fn cursor_mano(ctx: &egui::Context, cerrada: bool) {
+    let Some(c) = ctx.input(|i| i.pointer.latest_pos()) else { return };
+    ctx.set_cursor_icon(egui::CursorIcon::None);
+    cursor_mano_en(ctx, c, cerrada);
+}
+
+/// Dibuja la mano con el centro de la palma en `c`.
+/// Dibuja la mano con el centro de la palma en `c`.
+fn cursor_mano_en(ctx: &egui::Context, c: Pos2, cerrada: bool) {
+    let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("cursor_mano")));
+    // dedos: (x, punta) — cerrada: los dedos doblados casi no asoman
+    let dedos: [(f32, f32); 4] = if cerrada { [(-5.4, -5.0), (-1.8, -6.2), (1.8, -6.0), (5.4, -4.8)] } else { [(-5.4, -9.5), (-1.8, -12.0), (1.8, -11.5), (5.4, -9.0)] };
+    let pulgar = if cerrada { (Vec2::new(-7.0, 2.5), Vec2::new(-9.0, -0.5)) } else { (Vec2::new(-7.0, 2.5), Vec2::new(-11.5, -2.5)) };
+    let palma = Rect::from_min_max(c + Vec2::new(-7.3, -3.0), c + Vec2::new(7.3, 7.5));
+    for (ancho, col, extra) in [(5.6f32, Color32::from_gray(10), 1.0f32), (3.6, Color32::WHITE, 0.0)] {
+        let r = ancho / 2.0;
+        for (x, y) in dedos {
+            let a = c + Vec2::new(x, y);
+            let b = c + Vec2::new(x, 0.0);
+            p.line_segment([a, b], Stroke::new(ancho, col));
+            p.circle_filled(a, r, col);
+        }
+        let (a, b) = (c + pulgar.0, c + pulgar.1);
+        p.line_segment([a, b], Stroke::new(ancho, col));
+        p.circle_filled(b, r, col);
+        p.rect_filled(palma.expand(extra), 3.5 + extra, col);
+    }
+    // rayitas entre los dedos para que se lean separados
+    for x in [-3.6f32, 0.0, 3.6] {
+        p.line_segment([c + Vec2::new(x, -3.0), c + Vec2::new(x, if cerrada { -4.5 } else { -7.0 })], Stroke::new(0.8, Color32::from_gray(120)));
+    }
+    ctx.request_repaint();
+}
+
+/// Alto de la regla de los números (y el bucle) y de la franja del cabezal, debajo.
+const RUL_NUM: f32 = 26.0;
+const RUL_CAB: f32 = 18.0;
